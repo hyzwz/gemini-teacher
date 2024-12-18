@@ -23,7 +23,7 @@
                         <label class="block text-sm font-medium text-gray-700">密码</label>
                         <input type="password" id="password" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
-                    <button id="loginBtn" type="button" class="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    <button id="loginButton" class="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
                         登录
                     </button>
                     <div class="text-center text-sm text-gray-600">
@@ -90,6 +90,16 @@
                     <div class="record-btn-ripple"></div>
                 </button>
                 <div id="recordingStatus" class="text-sm text-gray-500 mt-2"></div>
+            </div>
+            <div class="container">
+                <div class="conversation-status">
+                    <div id="speakingIndicator" class="indicator"></div>
+                    <span id="statusText">等待开始对话...</span>
+                </div>
+                <div class="controls">
+                    <button id="startButton" class="control-button">开始对话</button>
+                    <button id="stopButton" class="control-button" disabled>结束对话</button>
+                </div>
             </div>
         </main>
     </div>

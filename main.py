@@ -37,6 +37,15 @@ load_dotenv()
 
 app = FastAPI()
 
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 在生产环境中应该设置具体的域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 配置日志记录
 logging.basicConfig(
     level=logging.INFO,
@@ -44,23 +53,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 配置CORS
-origins = [
-    "http://localhost:8081",
-    "http://0.0.0.0:8081",
-    "http://127.0.0.1:8081",
-    "http://localhost:5500",   # Live Server 地址
-    "http://127.0.0.1:5500",  # Live Server 备用地址
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# 静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -272,47 +265,27 @@ async def websocket_endpoint(
 
 @app.websocket("/ws/audio")
 async def websocket_audio_endpoint(websocket: WebSocket):
+    logger.info("收到新的WebSocket连接请求")
     await websocket.accept()
-    gemini = GeminiService()
+    logger.info("WebSocket连接已接受")
+    
+    gemini_service = GeminiService()
     
     try:
-        # 初始化Gemini服务连接
-        await gemini.setup_connection()
+        # 设置Gemini连接
+        logger.info("正在设置Gemini连接...")
+        await gemini_service.setup_connection(websocket)
+        logger.info("Gemini连接设置成功")
         
-        while True:
-            try:
-                # 接收音频数据
-                data = await websocket.receive_json()
-                if not data or 'audio_data' not in data:
-                    continue
-                    
-                audio_data = data['audio_data']
-                
-                # 处理音频数据
-                await gemini.process_audio_chunk(audio_data)
-                
-                # 接收并转发Gemini的响应
-                async for response in gemini.receive_responses():
-                    response_data = {}
-                    if response.text:
-                        response_data['text'] = response.text
-                    if response.audio:
-                        response_data['audio'] = base64.b64encode(response.audio).decode()
-                    
-                    if response_data:
-                        await websocket.send_json(response_data)
-                    
-            except json.JSONDecodeError:
-                logger.error("无效的JSON数据")
-                continue
-                
-    except WebSocketDisconnect:
+        # 处理音频流
+        logger.info("开始处理音频流...")
+        await gemini_service.handle_audio_stream(websocket)
+        
+    except ConnectionClosed:
         logger.info("WebSocket连接断开")
-        await gemini.close()
     except Exception as e:
-        logger.error(f"WebSocket处理错误: {str(e)}")
-        await gemini.close()
-        raise
+        logger.error(f"处理WebSocket连接时出错: {str(e)}")
+        await websocket.close()
 
 # 启动事件
 @app.on_event("startup")

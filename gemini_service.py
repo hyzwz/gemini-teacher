@@ -1,117 +1,128 @@
 import os
 import json
-import asyncio
 import base64
 import logging
-import pyaudio
-from dataclasses import dataclass
-from typing import Optional, AsyncGenerator
-import websockets
-from dotenv import load_dotenv
-
-load_dotenv()
+from websockets.exceptions import ConnectionClosed
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 音频配置
-CHUNK_SIZE = 2048
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-SEND_SAMPLE_RATE = 16000
-RECEIVE_SAMPLE_RATE = 24000
-
-@dataclass
-class GeminiResponse:
-    text: Optional[str] = None
-    audio: Optional[bytes] = None
+# API配置
+HOST = 'generativelanguage.googleapis.com'
+MODEL = "gemini-2.0-flash-exp"
 
 class GeminiService:
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+            raise ValueError("未设置GEMINI_API_KEY环境变量")
             
-        self.host = 'generativelanguage.googleapis.com'
-        self.model = "gemini-2.0-flash-exp"
-        self.ws_uri = f"wss://{self.host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
-        self.ws = None
-        self.audio_queue = asyncio.Queue()
-        self.response_queue = asyncio.Queue()
+        self.ws_uri = f"wss://{HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
         self.is_speaking = False
         
-    async def setup_connection(self):
-        """初始化WebSocket连接"""
-        headers = {"Content-Type": "application/json"}
-        self.ws = await websockets.connect(self.ws_uri, additional_headers=headers)
-        setup_msg = {"setup": {"model": f"models/{self.model}"}}
-        await self.ws.send(json.dumps(setup_msg))
-        await self.ws.recv()
-        
-    async def process_audio_chunk(self, chunk: str):
-        """处理单个音频块"""
-        if self.ws and not self.is_speaking:
-            try:
-                # 将base64字符串转换为字节
-                binary_data = base64.b64decode(chunk)
-                
-                msg = {
-                    "realtime_input": {
-                        "media_chunks": [
-                            {
-                                "data": base64.b64encode(binary_data).decode(),
-                                "mime_type": "audio/pcm"
-                            }
-                        ]
-                    }
-                }
-                await self.ws.send(json.dumps(msg))
-            except Exception as e:
-                logger.error(f"处理音频数据时出错: {str(e)}")
-                raise
-            
-    async def receive_responses(self) -> AsyncGenerator[GeminiResponse, None]:
-        """接收并处理响应"""
-        accumulated_audio = b""
+    async def setup_connection(self, websocket):
+        """初始化Gemini连接"""
         try:
-            async for msg in self.ws:
-                response = json.loads(msg)
+            setup_msg = {
+                "setup": {
+                    "model": f"models/{MODEL}"
+                }
+            }
+            logger.info(f"发送初始化消息: {json.dumps(setup_msg)}")
+            await websocket.send(json.dumps(setup_msg))
+            
+            # 接收原始消息而不解码
+            message = await websocket.receive()
+            logger.info("Gemini连接初始化成功")
+            return True
                 
-                if "serverContent" in response:
-                    self.is_speaking = True
-                    try:
-                        # 获取文本响应
-                        if "text" in response["serverContent"]:
-                            text = response["serverContent"]["text"]
-                            yield GeminiResponse(text=text)
-                            
-                        # 获取音频响应
-                        if "modelTurn" in response["serverContent"]:
-                            audio_data = response["serverContent"]["modelTurn"]["parts"][0]["inlineData"]["data"]
-                            audio_chunk = base64.b64decode(audio_data)
-                            accumulated_audio += audio_chunk
-                            
-                            if len(accumulated_audio) >= CHUNK_SIZE:
-                                yield GeminiResponse(audio=accumulated_audio)
-                                accumulated_audio = b""
-                                
-                    except KeyError as e:
-                        logger.error(f"解析响应时出错: {str(e)}")
+        except Exception as e:
+            logger.error(f"Gemini连接初始化失败: {str(e)}")
+            logger.error(f"错误详情: {type(e).__name__} - {str(e)}")
+            return False
+            
+    async def handle_audio_stream(self, websocket):
+        """处理实时音频流"""
+        try:
+            # 初始化连接
+            if not await self.setup_connection(websocket):
+                return
+                
+            while True:
+                try:
+                    # 接收音频数据
+                    message = await websocket.receive()
+                    if message.type == "bytes":
+                        audio_chunk = message.data
+                    else:
                         continue
                         
-                    # 如果响应完成
-                    if response["serverContent"].get("turnComplete"):
-                        if accumulated_audio:  # 发送剩余的音频数据
-                            yield GeminiResponse(audio=accumulated_audio)
-                        self.is_speaking = False
-                        break
+                    logger.info("收到音频数据")
+                    
+                    # 如果Gemini正在说话，不处理用户输入
+                    if self.is_speaking:
+                        logger.info("Gemini正在说话，跳过用户输入")
+                        continue
+                    
+                    # 发送音频数据到Gemini
+                    msg = {
+                        "realtime_input": {
+                            "media_chunks": [
+                                {
+                                    "data": base64.b64encode(audio_chunk).decode(),
+                                    "mime_type": "audio/pcm"
+                                }
+                            ]
+                        }
+                    }
+                    logger.info("发送音频数据到Gemini")
+                    await websocket.send(json.dumps(msg))
+                    
+                    # 接收Gemini响应并解码为文本
+                    response = await websocket.receive()
+                    if response.type != "text":
+                        continue
                         
+                    try:
+                        response_data = json.loads(response.data)
+                        logger.info("收到Gemini响应")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON解析错误: {str(e)}")
+                        continue
+                    
+                    if "serverContent" in response_data:
+                        self.is_speaking = True
+                        try:
+                            # 获取模型回复中的音频数据
+                            model_turn = response_data.get("serverContent", {}).get("modelTurn", {})
+                            parts = model_turn.get("parts", [])
+                            if parts and len(parts) > 0:
+                                inline_data = parts[0].get("inlineData", {})
+                                audio_data = inline_data.get("data")
+                                if audio_data:
+                                    decoded_audio = base64.b64decode(audio_data)
+                                    logger.info("发送音频响应到客户端")
+                                    await websocket.send(decoded_audio)
+                                else:
+                                    logger.warning("响应中没有音频数据")
+                            else:
+                                logger.warning("响应中没有parts数据")
+                        except Exception as e:
+                            logger.error(f"处理响应数据时出错: {str(e)}")
+                            continue
+                        
+                        # 检查是否完成
+                        if response_data.get("serverContent", {}).get("turnComplete"):
+                            logger.info("Gemini响应完成")
+                            self.is_speaking = False
+                    
+                except ConnectionClosed:
+                    logger.info("WebSocket连接断开")
+                    break
+                except Exception as e:
+                    logger.error(f"处理音频流时出错: {str(e)}")
+                    continue
+                    
         except Exception as e:
-            logger.error(f"接收响应时出错: {str(e)}")
-            raise
-
-    async def close(self):
-        """关闭连接"""
-        if self.ws:
-            await self.ws.close()
+            logger.error(f"处理WebSocket连接时出错: {str(e)}")
