@@ -200,11 +200,12 @@ a:hover {
 
 /* 录音中的状态 */
 .record-btn.recording .record-btn-inner {
-    background: #EF4444;
+    background: #dc2626;
     transform: translate(-50%, -50%) scale(0.9);
 }
 
 .record-btn.recording .record-btn-ripple {
+    background: rgba(220, 38, 38, 0.3);
     animation: ripple 1.5s infinite;
 }
 
@@ -218,7 +219,7 @@ a:hover {
         opacity: 1;
     }
     100% {
-        transform: translate(-50%, -50%) scale(2);
+        transform: translate(-50%, -50%) scale(1.5);
         opacity: 0;
     }
 }
