@@ -1,52 +1,104 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-    <title>英语学习助手</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 语言教师</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/css/style.css" rel="stylesheet">
 </head>
-<body>
-    <div class="container">
-        <div id="loginSection" class="section">
-            <h2>登录</h2>
-            <form id="loginForm" onsubmit="return false;">
-                <input type="text" id="username" placeholder="用户名" required>
-                <input type="password" id="password" placeholder="密码" required>
-                <button type="submit">登录</button>
-            </form>
-            <p>还没有账号？ <a href="#" id="showRegister">注册</a></p>
-        </div>
-
-        <div id="registerSection" class="section" style="display: none;">
-            <h2>注册</h2>
-            <form id="registerForm" onsubmit="return false;">
-                <input type="text" id="regUsername" placeholder="用户名" required>
-                <input type="email" id="regEmail" placeholder="邮箱" required>
-                <input type="password" id="regPassword" placeholder="密码" required>
-                <button type="submit">注册</button>
-            </form>
-            <p>已有账号？ <a href="#" id="showLogin">登录</a></p>
-        </div>
-
-        <div id="mainSection" class="section" style="display: none;">
-            <h1>英语学习助手</h1>
-            <div class="status-bar">
-                <span>连接状态: <span id="connectionStatus">未连接</span></span>
-                <span>录音状态: <span id="recordStatus">就绪</span></span>
+<body class="bg-gray-100 h-screen">
+    <div id="loginContainer" class="container mx-auto px-4 h-screen flex items-center justify-center">
+        <div class="bg-white p-8 rounded-lg shadow-md w-full max-w-md">
+            <!-- 登录表单 -->
+            <div id="loginForm">
+                <h1 class="text-2xl font-bold text-center mb-6">登录</h1>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">用户名</label>
+                        <input type="text" id="username" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">密码</label>
+                        <input type="password" id="password" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <button id="loginBtn" type="button" class="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                        登录
+                    </button>
+                    <div class="text-center text-sm text-gray-600">
+                        还没有账号？ 
+                        <button id="showRegisterBtn" class="text-blue-500 hover:text-blue-700">注册新账号</button>
+                    </div>
+                </div>
             </div>
-            <div class="controls">
-                <button id="recordButton" class="record-button">
-                    <span class="record-icon"></span>
-                    <span class="record-ripple"></span>
-                </button>
+    
+            <!-- 注册表单 -->
+            <div id="registerForm" class="hidden">
+                <h1 class="text-2xl font-bold text-center mb-6">注册</h1>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">用户名</label>
+                        <input type="text" id="regUsername" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">邮箱</label>
+                        <input type="email" id="regEmail" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">密码</label>
+                        <input type="password" id="regPassword" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <button id="registerBtn" type="button" class="w-full bg-green-500 text-white py-2 px-4 rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2">
+                        注册
+                    </button>
+                    <div class="text-center text-sm text-gray-600">
+                        已有账号？ 
+                        <button id="showLoginBtn" class="text-blue-500 hover:text-blue-700">返回登录</button>
+                    </div>
+                </div>
             </div>
-            <div class="display">
-                <div id="userInput" class="message-box">您说：</div>
-                <div id="feedback" class="message-box">Gemini反馈：</div>
-            </div>
-            <button id="logout" class="secondary-button">登出</button>
         </div>
     </div>
+
+    <div id="chatContainer" class="hidden container mx-auto px-4 h-screen flex flex-col">
+        <header class="bg-white shadow-md p-4 mb-4 rounded-lg mt-4">
+            <div class="flex justify-between items-center">
+                <div class="flex items-center">
+                    <h1 class="text-xl font-bold">Gemini 语言教师</h1>
+                    <div class="ml-4 flex items-center">
+                        <span class="connection-status status-disconnected" id="connectionStatus"></span>
+                        <span class="text-sm text-gray-600" id="connectionText">未连接</span>
+                    </div>
+                </div>
+                <button id="logoutBtn" class="text-gray-600 hover:text-gray-800">
+                    <i class="fas fa-sign-out-alt"></i> 退出
+                </button>
+            </div>
+        </header>
+
+        <main class="flex-grow bg-white rounded-lg shadow-md p-4 mb-4 overflow-hidden flex flex-col">
+            <div id="messageContainer" class="flex-grow overflow-y-auto space-y-4 p-4">
+                <!-- 消息将在这里动态添加 -->
+            </div>
+
+            <div class="border-t pt-4">
+                <div class="flex items-center justify-center space-x-4">
+                    <button id="startRecordBtn" class="flex items-center justify-center space-x-2 bg-blue-500 text-white py-2 px-6 rounded-full hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                        <i class="fas fa-microphone"></i>
+                        <span>开始录音</span>
+                    </button>
+                    <button id="stopRecordBtn" class="hidden flex items-center justify-center space-x-2 bg-red-500 text-white py-2 px-6 rounded-full hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+                        <i class="fas fa-stop recording-pulse"></i>
+                        <span>停止录音</span>
+                    </button>
+                </div>
+                <div id="recordingStatus" class="text-center mt-2 text-sm text-gray-500"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/config.js"></script>
     <script src="/static/js/main.js"></script>
 </body>
 </html>

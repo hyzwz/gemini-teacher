@@ -1,292 +1,263 @@
 class AudioRecorder {
     constructor() {
-        this.recognition = null;
+        this.mediaRecorder = null;
+        this.audioChunks = [];
         this.isRecording = false;
-        this.initSpeechRecognition();
-    }
-
-    initSpeechRecognition() {
-        if ('webkitSpeechRecognition' in window) {
-            this.recognition = new webkitSpeechRecognition();
-            this.recognition.continuous = true;
-            this.recognition.interimResults = true;
-            this.recognition.lang = 'zh-CN';
-
-            this.recognition.onresult = (event) => {
-                let interimTranscript = '';
-                let finalTranscript = '';
-
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    const transcript = event.results[i][0].transcript;
-                    if (event.results[i].isFinal) {
-                        finalTranscript += transcript;
-                        // 发送最终结果到WebSocket
-                        if (this.onFinalResult) {
-                            this.onFinalResult(finalTranscript);
-                        }
-                    } else {
-                        interimTranscript += transcript;
-                        // 更新临时结果显示
-                        if (this.onInterimResult) {
-                            this.onInterimResult(interimTranscript);
-                        }
-                    }
-                }
-            };
-
-            this.recognition.onerror = (event) => {
-                console.error('语音识别错误:', event.error);
-                this.stop();
-            };
-
-            this.recognition.onend = () => {
-                if (this.isRecording) {
-                    this.recognition.start();
-                }
-            };
-        } else {
-            console.error('浏览器不支持语音识别');
-        }
     }
 
     async start() {
         try {
-            if (!this.recognition) {
-                throw new Error('语音识别未初始化');
-            }
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            this.mediaRecorder = new MediaRecorder(stream);
+            this.audioChunks = [];
+            
+            this.mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    this.audioChunks.push(event.data);
+                }
+            };
+
+            this.mediaRecorder.start();
             this.isRecording = true;
-            this.recognition.start();
-            return true;
         } catch (error) {
-            console.error('开始录音错误:', error);
+            console.error('录音启动失败:', error);
             throw error;
         }
     }
 
     stop() {
-        this.isRecording = false;
-        if (this.recognition) {
-            this.recognition.stop();
-        }
-    }
-
-    setFinalResultCallback(callback) {
-        this.onFinalResult = callback;
-    }
-
-    setInterimResultCallback(callback) {
-        this.onInterimResult = callback;
+        return new Promise((resolve) => {
+            this.mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(this.audioChunks, { type: 'audio/wav' });
+                this.isRecording = false;
+                resolve(audioBlob);
+            };
+            this.mediaRecorder.stop();
+            this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        });
     }
 }
 
 class WebSocketClient {
-    constructor() {
-        this.ws = null;
+    constructor(token) {
+        this.socket = null;
+        this.token = token;
+        this.messageHandlers = new Set();
+        this.connectionStatus = document.getElementById('connectionStatus');
+        this.connectionText = document.getElementById('connectionText');
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 5;
-        this.speechSynthesis = window.speechSynthesis;
-        this.speaking = false;
+    }
+
+    updateConnectionStatus(status) {
+        this.connectionStatus.className = 'connection-status';
+        switch (status) {
+            case 'connected':
+                this.connectionStatus.classList.add('status-connected');
+                this.connectionText.textContent = '已连接';
+                break;
+            case 'disconnected':
+                this.connectionStatus.classList.add('status-disconnected');
+                this.connectionText.textContent = '未连接';
+                break;
+            case 'connecting':
+                this.connectionStatus.classList.add('status-connecting');
+                this.connectionText.textContent = '连接中...';
+                break;
+        }
     }
 
     connect() {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            console.error('No token available');
-            return;
-        }
-
-        // 强制使用8081端口
-        const wsUrl = `ws://127.0.0.1:8081/ws/${token}`;
-        console.log('尝试连接WebSocket:', wsUrl);
+        const wsUrl = `${config.endpoints.ws}${config.endpoints.ws_endpoint}?token=${this.token}`;
         
-        try {
-            this.ws = new WebSocket(wsUrl);
-            
-            this.ws.onopen = () => this.onopen();
-            this.ws.onmessage = (event) => this.onmessage(event);
-            this.ws.onclose = (event) => this.onclose(event);
-            this.ws.onerror = (error) => this.onerror(error);
-        } catch (error) {
-            console.error('创建WebSocket连接失败:', error);
-            document.getElementById('connectionStatus').textContent = '连接失败';
-        }
-    }
-
-    onopen() {
-        console.log('WebSocket连接已建立');
-        document.getElementById('connectionStatus').textContent = '已连接';
-        this.reconnectAttempts = 0;
-    }
-
-    async onmessage(event) {
-        try {
-            const response = JSON.parse(event.data);
-            console.log('收到消息:', response);
-            
-            if (response.text) {
-                document.getElementById('feedback').textContent = 'Gemini反馈：' + response.text;
-                
-                // 如果当前没有在播放，则开始语音合成
-                if (!this.speaking) {
-                    await this.speakText(response.text);
-                }
-            }
-        } catch (error) {
-            console.error('处理消息时出错:', error);
-        }
-    }
-
-    onerror(error) {
-        console.error('WebSocket错误:', error);
-        document.getElementById('connectionStatus').textContent = '连接错误';
-    }
-
-    onclose(event) {
-        console.log('WebSocket连接已关闭, code:', event.code, '原因:', event.reason);
-        document.getElementById('connectionStatus').textContent = '未连接';
+        this.updateConnectionStatus('connecting');
+        this.socket = new WebSocket(wsUrl);
         
-        if (this.reconnectAttempts < this.maxReconnectAttempts) {
-            console.log('准备重新连接...');
-            this.reconnect();
-        } else {
-            console.log('达到最大重连次数，停止重连');
-        }
-    }
-
-    reconnect() {
-        this.reconnectAttempts++;
-        console.log(`尝试重新连接... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        setTimeout(() => this.connect(), 2000);
-    }
-
-    send(message) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            console.log('发送消息到WebSocket:', message);
-            this.ws.send(message);
-        } else {
-            console.error('WebSocket未连接，无法发送消息');
-            document.getElementById('connectionStatus').textContent = '未连接';
-            document.getElementById('connectionStatus').style.color = 'red';
-            if (this.reconnectAttempts < this.maxReconnectAttempts) {
-                console.log('尝试重新连接并发送消息...');
-                this.connect();
-                setTimeout(() => this.send(message), 1000);
-            }
-        }
-    }
-
-    close() {
-        if (this.ws) {
-            console.log('关闭WebSocket连接');
-            this.ws.close();
-        }
-    }
-
-    async speakText(text) {
-        // 如果浏览器支持语音合成
-        if (this.speechSynthesis) {
-            // 如果正在播放，先停止
-            if (this.speaking) {
-                this.speechSynthesis.cancel();
-            }
-
-            this.speaking = true;
-            const utterance = new SpeechSynthesisUtterance(text);
+        this.socket.onopen = () => {
+            console.log('WebSocket连接已建立');
+            this.updateConnectionStatus('connected');
+            this.notifyHandlers({ type: 'connection', status: 'connected' });
+            this.reconnectAttempts = 0; // 重置重连计数
+        };
+        
+        this.socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            this.notifyHandlers({ type: 'message', data });
+        };
+        
+        this.socket.onclose = () => {
+            console.log('WebSocket连接已关闭');
+            this.updateConnectionStatus('disconnected');
+            this.notifyHandlers({ type: 'connection', status: 'disconnected' });
             
-            // 设置语音参数
-            utterance.lang = 'zh-CN'; // 设置语言为中文
-            utterance.rate = 1.0;     // 语速
-            utterance.pitch = 1.0;    // 音高
-            utterance.volume = 1.0;   // 音量
+            // 检查是否应该重新连接
+            if (this.reconnectAttempts < config.websocket.maxReconnectAttempts) {
+                setTimeout(() => {
+                    if (this.socket.readyState === WebSocket.CLOSED) {
+                        this.reconnectAttempts++;
+                        console.log(`尝试重新连接 (${this.reconnectAttempts}/${config.websocket.maxReconnectAttempts})`);
+                        this.connect();
+                    }
+                }, config.websocket.reconnectInterval);
+            } else {
+                console.log('达到最大重连次数，停止重连');
+            }
+        };
+        
+        this.socket.onerror = (error) => {
+            console.error('WebSocket错误:', error);
+            this.updateConnectionStatus('disconnected');
+            this.notifyHandlers({ type: 'error', error });
+        };
+    }
 
-            // 监听语音结束事件
-            utterance.onend = () => {
-                this.speaking = false;
-            };
-
-            // 监听错误事件
-            utterance.onerror = (error) => {
-                console.error('语音合成错误:', error);
-                this.speaking = false;
-            };
-
-            // 开始播放
-            this.speechSynthesis.speak(utterance);
+    disconnect() {
+        if (this.socket) {
+            this.socket.close();
+            this.updateConnectionStatus('disconnected');
         }
+    }
+
+    sendAudio(audioBlob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const base64Audio = reader.result.split(',')[1];
+                const message = {
+                    type: 'audio',
+                    data: base64Audio
+                };
+                this.socket.send(JSON.stringify(message));
+                resolve();
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(audioBlob);
+        });
+    }
+
+    addMessageHandler(handler) {
+        this.messageHandlers.add(handler);
+    }
+
+    removeMessageHandler(handler) {
+        this.messageHandlers.delete(handler);
+    }
+
+    notifyHandlers(message) {
+        this.messageHandlers.forEach(handler => handler(message));
     }
 }
 
-// 主应用类
+class ChatUI {
+    constructor() {
+        this.messageContainer = document.getElementById('messageContainer');
+    }
+
+    addMessage(text, isUser = false) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${isUser ? 'user-message' : 'gemini-message'}`;
+        messageDiv.textContent = text;
+        this.messageContainer.appendChild(messageDiv);
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    showLoading() {
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'message gemini-message loading-dots';
+        loadingDiv.textContent = '正在思考';
+        loadingDiv.id = 'loadingMessage';
+        this.messageContainer.appendChild(loadingDiv);
+        this.messageContainer.scrollTop = this.messageContainer.scrollHeight;
+    }
+
+    removeLoading() {
+        const loadingMessage = document.getElementById('loadingMessage');
+        if (loadingMessage) {
+            loadingMessage.remove();
+        }
+    }
+
+    playAudio(audioData) {
+        const audio = new Audio(`data:audio/wav;base64,${audioData}`);
+        audio.play();
+    }
+}
+
 class App {
     constructor() {
-        this.audioRecorder = new AudioRecorder();
-        this.wsClient = new WebSocketClient();
+        this.recorder = new AudioRecorder();
+        this.wsClient = null;
+        this.chatUI = new ChatUI();
         this.setupEventListeners();
     }
 
     setupEventListeners() {
-        // 登录表单处理
-        document.getElementById('loginForm').onsubmit = (e) => {
-            e.preventDefault();
+        // 登录按钮处理
+        document.getElementById('loginBtn').addEventListener('click', () => {
             this.handleLogin();
-        };
+        });
 
-        // 注册表单处理
-        document.getElementById('registerForm').onsubmit = (e) => {
-            e.preventDefault();
+        // 注册按钮处理
+        document.getElementById('registerBtn').addEventListener('click', () => {
             this.handleRegister();
-        };
+        });
 
-        // 录音控制
-        const recordButton = document.getElementById('recordButton');
-        recordButton.onclick = () => {
-            if (!recordButton.classList.contains('recording')) {
-                this.startRecording();
-                recordButton.classList.add('recording');
-            } else {
-                this.stopRecording();
-                recordButton.classList.remove('recording');
-            }
-        };
+        // 显示注册表单
+        document.getElementById('showRegisterBtn').addEventListener('click', () => {
+            document.getElementById('loginForm').classList.add('hidden');
+            document.getElementById('registerForm').classList.remove('hidden');
+        });
 
-        // 登出处理
-        document.getElementById('logout').onclick = () => {
+        // 显示登录表单
+        document.getElementById('showLoginBtn').addEventListener('click', () => {
+            document.getElementById('registerForm').classList.add('hidden');
+            document.getElementById('loginForm').classList.remove('hidden');
+        });
+
+        // 录音按钮处理
+        document.getElementById('startRecordBtn').addEventListener('click', () => {
+            this.startRecording();
+        });
+
+        document.getElementById('stopRecordBtn').addEventListener('click', () => {
+            this.stopRecording();
+        });
+
+        // 登出按钮处理
+        document.getElementById('logoutBtn').addEventListener('click', () => {
             this.handleLogout();
-        };
+        });
     }
 
     async handleLogin() {
         const username = document.getElementById('username').value;
         const password = document.getElementById('password').value;
 
-        try {
-            console.log('开始登录请求...');
-            const formData = new URLSearchParams();
-            formData.append('username', username);
-            formData.append('password', password);
+        // 创建表单数据
+        const formData = new URLSearchParams();
+        formData.append('username', username);
+        formData.append('password', password);
 
-            const response = await axios.post('/token', formData, {
+        try {
+            const response = await fetch(`${config.endpoints.base}${config.endpoints.login}`, {
+                method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: formData,
             });
 
-            console.log('登录响应:', response.data);
-            if (response.data.access_token) {
-                console.log('获取到token，正在存储...');
-                localStorage.setItem('token', response.data.access_token);
-                console.log('token已存储，准备显示主界面...');
-                this.showMainSection();
-                console.log('正在连接WebSocket...');
-                this.wsClient.connect();
+            const data = await response.json();
+
+            if (response.ok) {
+                localStorage.setItem('token', data.access_token);  // 注意这里使用 access_token
+                this.showChatInterface();
+                this.initializeWebSocket(data.access_token);
             } else {
-                console.error('登录响应中没有token');
-                alert('登录失败：服务器响应格式错误');
+                alert(data.detail || '登录失败');
             }
         } catch (error) {
             console.error('登录错误:', error);
-            console.error('错误详情:', error.response?.data);
-            alert('登录失败：' + (error.response?.data?.detail || error.message));
+            alert('登录过程中发生错误');
         }
     }
 
@@ -296,129 +267,108 @@ class App {
         const password = document.getElementById('regPassword').value;
 
         try {
-            const formData = new URLSearchParams();
-            formData.append('username', username);
-            formData.append('email', email);
-            formData.append('password', password);
-
-            const response = await axios.post('/register', formData, {
+            const response = await fetch(`${config.endpoints.base}${config.endpoints.register}`, {
+                method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            });
-            alert('注册成功！请登录');
-            this.showLoginSection();
-        } catch (error) {
-            alert('注册失败：' + (error.response?.data?.detail || error.message));
-        }
-    }
-
-    async startRecording() {
-        try {
-            document.getElementById('recordStatus').textContent = '录音中...';
-
-            this.audioRecorder.setFinalResultCallback((text) => {
-                console.log('录音转文本结果:', text);
-                document.getElementById('userInput').textContent = '您说：' + text;
-                console.log('发送文本到WebSocket:', text);
-                this.wsClient.send(text);
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ username, email, password }),
             });
 
-            this.audioRecorder.setInterimResultCallback((text) => {
-                document.getElementById('userInput').textContent = '您说：' + text;
-            });
+            const data = await response.json();
 
-            await this.audioRecorder.start();
+            if (response.ok) {
+                alert('注册成功！请登录');
+                // 显示登录表单
+                document.getElementById('registerForm').classList.add('hidden');
+                document.getElementById('loginForm').classList.remove('hidden');
+                // 预填充用户名
+                document.getElementById('username').value = username;
+            } else {
+                alert(data.detail || '注册失败');
+            }
         } catch (error) {
-            console.error('录音失败：', error);
-            document.getElementById('recordStatus').textContent = '错误';
-            const recordButton = document.getElementById('recordButton');
-            recordButton.classList.remove('recording');
-        }
-    }
-
-    async stopRecording() {
-        try {
-            document.getElementById('recordStatus').textContent = '就绪';
-            this.audioRecorder.stop();
-        } catch (error) {
-            console.error('停止录音时出错:', error);
-            document.getElementById('recordStatus').textContent = '错误';
+            console.error('注册错误:', error);
+            alert('注册过程中发生错误');
         }
     }
 
     handleLogout() {
         localStorage.removeItem('token');
-        this.wsClient.close();
-        this.showLoginSection();
+        if (this.wsClient) {
+            this.wsClient.disconnect();
+        }
+        this.showLoginInterface();
     }
 
-    showLoginSection() {
-        document.getElementById('loginSection').style.display = 'block';
-        document.getElementById('registerSection').style.display = 'none';
-        document.getElementById('mainSection').style.display = 'none';
+    showLoginInterface() {
+        document.getElementById('loginContainer').classList.remove('hidden');
+        document.getElementById('chatContainer').classList.add('hidden');
     }
 
-    showRegisterSection() {
-        document.getElementById('loginSection').style.display = 'none';
-        document.getElementById('registerSection').style.display = 'block';
-        document.getElementById('mainSection').style.display = 'none';
+    showChatInterface() {
+        document.getElementById('loginContainer').classList.add('hidden');
+        document.getElementById('chatContainer').classList.remove('hidden');
     }
 
-    showMainSection() {
-        document.getElementById('loginSection').style.display = 'none';
-        document.getElementById('registerSection').style.display = 'none';
-        document.getElementById('mainSection').style.display = 'block';
+    initializeWebSocket(token) {
+        this.wsClient = new WebSocketClient(token);
+        
+        this.wsClient.addMessageHandler((message) => {
+            if (message.type === 'message') {
+                this.chatUI.removeLoading();
+                
+                if (message.data.text) {
+                    this.chatUI.addMessage(message.data.text, false);
+                }
+                
+                if (message.data.audio) {
+                    this.chatUI.playAudio(message.data.audio);
+                }
+            }
+        });
+        
+        this.wsClient.connect();
+    }
+
+    async startRecording() {
+        try {
+            await this.recorder.start();
+            document.getElementById('startRecordBtn').classList.add('hidden');
+            document.getElementById('stopRecordBtn').classList.remove('hidden');
+            document.getElementById('recordingStatus').textContent = '正在录音...';
+        } catch (error) {
+            console.error('录音启动失败:', error);
+            alert('无法启动录音，请检查麦克风权限');
+        }
+    }
+
+    async stopRecording() {
+        try {
+            const audioBlob = await this.recorder.stop();
+            document.getElementById('startRecordBtn').classList.remove('hidden');
+            document.getElementById('stopRecordBtn').classList.add('hidden');
+            document.getElementById('recordingStatus').textContent = '';
+            
+            this.chatUI.showLoading();
+            await this.wsClient.sendAudio(audioBlob);
+        } catch (error) {
+            console.error('录音停止失败:', error);
+            alert('录音处理过程中发生错误');
+        }
+    }
+
+    initialize() {
+        const token = localStorage.getItem('token');
+        if (token) {
+            this.showChatInterface();
+            this.initializeWebSocket(token);
+        } else {
+            this.showLoginInterface();
+        }
     }
 }
 
-// 添加axios请求拦截器
-axios.interceptors.request.use(function (config) {
-    const token = localStorage.getItem('token');
-    if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-}, function (error) {
-    return Promise.reject(error);
-});
-
-// 添加axios响应拦截器
-axios.interceptors.response.use(function (response) {
-    return response;
-}, function (error) {
-    if (error.response && error.response.status === 401) {
-        // token过期或无效，清除token并返回登录页面
-        localStorage.removeItem('token');
-        window.app.showLoginSection();
-    }
-    return Promise.reject(error);
-});
-
-// 初始化应用
-window.onload = () => {
-    // 设置 axios 默认配置
-    axios.defaults.baseURL = 'http://127.0.0.1:8081';  // 修改为实际使用的地址
-    axios.defaults.withCredentials = true;  // 允许跨域请求携带凭证
-    
-    const app = new App();
-    window.app = app;  // 保存app实例到全局，方便拦截器使用
-
-    // 添加注册和登录切换的事件监听
-    document.getElementById('showRegister').addEventListener('click', (e) => {
-        e.preventDefault();
-        app.showRegisterSection();
-    });
-    
-    document.getElementById('showLogin').addEventListener('click', (e) => {
-        e.preventDefault();
-        app.showLoginSection();
-    });
-
-    // 检查是否已登录
-    const token = localStorage.getItem('token');
-    if (token) {
-        app.showMainSection();
-        app.wsClient.connect();
-    }
-};
+// 启动应用
+const app = new App();
+app.initialize();
