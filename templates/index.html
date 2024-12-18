@@ -9,7 +9,7 @@
     <div class="container">
         <div id="loginSection" class="section">
             <h2>登录</h2>
-            <form id="loginForm">
+            <form id="loginForm" onsubmit="return false;">
                 <input type="text" id="username" placeholder="用户名" required>
                 <input type="password" id="password" placeholder="密码" required>
                 <button type="submit">登录</button>
@@ -19,7 +19,7 @@
 
         <div id="registerSection" class="section" style="display: none;">
             <h2>注册</h2>
-            <form id="registerForm">
+            <form id="registerForm" onsubmit="return false;">
                 <input type="text" id="regUsername" placeholder="用户名" required>
                 <input type="email" id="regEmail" placeholder="邮箱" required>
                 <input type="password" id="regPassword" placeholder="密码" required>
@@ -35,8 +35,10 @@
                 <span>录音状态: <span id="recordStatus">就绪</span></span>
             </div>
             <div class="controls">
-                <button id="startRecord" class="primary-button">开始录音</button>
-                <button id="stopRecord" class="primary-button" disabled>停止录音</button>
+                <button id="recordButton" class="record-button">
+                    <span class="record-icon"></span>
+                    <span class="record-ripple"></span>
+                </button>
             </div>
             <div class="display">
                 <div id="userInput" class="message-box">您说：</div>

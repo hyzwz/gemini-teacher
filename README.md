@@ -85,6 +85,27 @@ python -m uvicorn main:app --reload --host 0.0.0.0 --port 8081
   - 用户认证
   - Gemini AI集成
 
+## 语音识别实现
+
+系统使用 Web Speech API 实现实时语音识别：
+
+1. 前端实现
+   - 使用 webkitSpeechRecognition API
+   - 支持实时语音识别（continuous 和 interimResults）
+   - 支持中文识别（lang='zh-CN'）
+   - 无需额外服务器或 API Key
+
+2. 功能特点
+   - 实时显示识别结果
+   - 自动重连机制
+   - 错误处理和状态显示
+   - 支持临时结果和最终结果
+
+注意：使用 Web Speech API 需要：
+- 现代浏览器（推荐 Chrome）
+- 麦克风权限
+- 网络连接
+
 ## 交互说明
 
 - 🟢 已连接：WebSocket连接正常

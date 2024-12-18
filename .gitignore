@@ -5,3 +5,5 @@
 .gitpod.yml
 
 .env
+
+__pycache__

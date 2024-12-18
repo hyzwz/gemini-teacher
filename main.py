@@ -1,36 +1,35 @@
-from fastapi import FastAPI, WebSocket, Depends, HTTPException, status, Request, Form, File, UploadFile
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, Request, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import timedelta
+from datetime import datetime, timedelta
 from jose import jwt, JWTError
 import json
 import os
 import uuid
 import logging
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 import time
 from sqlalchemy import select
-
 from database import get_db, init_db
 from models import User, UserLog
 from auth import (
     get_current_user,
     create_access_token,
+    authenticate_user,
     get_password_hash,
-    verify_password,
-    ACCESS_TOKEN_EXPIRE_MINUTES,
     get_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
     SECRET_KEY,
     ALGORITHM
 )
 from gemini_service import GeminiService
-import speech_recognition as sr
+from fastapi.templating import Jinja2Templates
 
 # 加载环境变量
 load_dotenv()
@@ -38,17 +37,28 @@ api_keys = json.loads(os.getenv("GEMINI_API_KEYS", "[]"))
 
 app = FastAPI()
 
-# 添加CORS中间件
+# 配置日志记录
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 配置CORS
+origins = [
+    "http://localhost:8081",
+    "http://0.0.0.0:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:5500",   # Live Server 地址
+    "http://127.0.0.1:5500",  # Live Server 备用地址
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5500",  # Live Server 地址
-        "http://localhost:5500",   # 备用地址
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -66,27 +76,27 @@ async def read_root(request: Request):
 
 # API路由
 @app.post("/token")
-async def login_for_access_token(
+async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await get_user(db, form_data.username)
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    user = await authenticate_user(db, form_data.username, form_data.password)
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # 记录登录日志
     log = UserLog(
         user_id=user.id,
         action="login",
-        content=f"User logged in from {form_data.client_id if hasattr(form_data, 'client_id') else 'unknown'}"
+        content="User logged in successfully",
     )
     db.add(log)
     await db.commit()
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
@@ -128,203 +138,127 @@ async def register(
             detail=str(e)
         )
 
-@app.post("/speech-to-text")
-async def speech_to_text(audio: UploadFile = File(...)):
-    try:
-        print("开始处理语音文件...")
-        # 保存上传的音频文件
-        audio_path = f"temp_{uuid.uuid4()}.wav"
-        with open(audio_path, "wb") as buffer:
-            content = await audio.read()
-            buffer.write(content)
-            
-        print(f"音频文件已保存到: {audio_path}")
-
-        try:
-            # 使用Google Speech Recognition进行语音识别
-            recognizer = sr.Recognizer()
-            with sr.AudioFile(audio_path) as source:
-                print("正在读取音频文件...")
-                audio_data = recognizer.record(source)
-                print("正在进行语音识别...")
-                text = recognizer.recognize_google(audio_data, language="zh-CN")
-                print(f"语音识别结果: {text}")
-                return {"text": text}
-        except sr.UnknownValueError:
-            print("Google Speech Recognition无法理解音频")
-            raise HTTPException(status_code=400, detail="无法识别语音内容")
-        except sr.RequestError as e:
-            print(f"无法从Google Speech Recognition服务获取结果; {e}")
-            raise HTTPException(status_code=500, detail="语音识别服务暂时不可用")
-        finally:
-            # 清理临时文件
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-                print("临时音频文件已删除")
-
-    except Exception as e:
-        print(f"语音识别错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # WebSocket连接管理
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict = {}
         self.gemini_service = GeminiService(api_keys)
-    
+
     async def connect(self, websocket: WebSocket, client_id: str):
-        # 不需要再次accept，因为在endpoint中已经accept过了
         self.active_connections[client_id] = websocket
+        logger.info(f"客户端 {client_id} 已连接")
 
     def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
-    
+            logger.info(f"客户端 {client_id} 已断开连接")
+
     async def process_message(self, message: str, client_id: str, user_id: int, db: AsyncSession):
-        start_time = time.time()
         try:
-            print(f"开始处理消息: client_id={client_id}, user_id={user_id}")
-            print(f"消息内容: {message[:100]}...")
+            websocket = self.active_connections[client_id]
+            logger.info(f"处理来自客户端 {client_id} 的消息: {message}")
+
+            # 处理消息
+            response_text, api_key = await self.gemini_service.process_with_gemini(message)
             
-            response, api_key = await self.gemini_service.process_with_gemini(message)
-            print(f"Gemini API响应: {response[:100]}...")
+            # 发送JSON格式的响应
+            response_data = {
+                "text": response_text,
+                "type": "gemini_response"
+            }
+            await websocket.send_json(response_data)
             
-            # 记录用户操作日志
-            processing_time = int((time.time() - start_time) * 1000)  # 转换为毫秒
-            print(f"处理时间: {processing_time}ms")
-            
+            # 记录用户对话
             log = UserLog(
                 user_id=user_id,
-                action="speech_input",
-                content=message,
-                response=response,
-                api_key_used=api_key[-8:],  # 只存储API密钥的最后8位
-                processing_time=processing_time
+                action="chat",
+                content=f"User: {message}\nGemini: {response_text}",
+                api_key_used=api_key[-8:] if api_key else None,
+                processing_time=None
             )
             db.add(log)
             await db.commit()
-            print("用户操作日志已记录")
-            
-            if client_id in self.active_connections:
-                print(f"发送响应到客户端: {client_id}")
-                await self.active_connections[client_id].send_text(response)
-                print("响应已发送")
-            else:
-                print(f"客户端已断开连接: {client_id}")
-        
+
         except Exception as e:
-            error_message = f"Error processing message: {str(e)}"
-            print(f"处理消息时出错: {error_message}")
-            if client_id in self.active_connections:
-                await self.active_connections[client_id].send_text(error_message)
+            logger.error(f"处理消息时出错: {str(e)}")
+            error_response = {
+                "text": f"处理消息时出错: {str(e)}",
+                "type": "error"
+            }
+            try:
+                await websocket.send_json(error_response)
+            except Exception as ws_error:
+                logger.error(f"发送错误消息失败: {str(ws_error)}")
 
 manager = ConnectionManager()
 
-@app.websocket("/ws/{client_id}")
+@app.websocket("/ws/{token}")
 async def websocket_endpoint(
     websocket: WebSocket,
-    client_id: str,
+    token: str,
     db: AsyncSession = Depends(get_db)
 ):
-    print(f"收到WebSocket连接请求: client_id={client_id}")
+    client_id = None
     try:
-        # 先接受连接
-        await websocket.accept()
-        print("WebSocket连接已接受")
+        # 验证token
+        logger.info("开始验证token: %s", token[:10] if token else None)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            logger.error("Token中没有用户名")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
         
-        # 获取token
-        token = None
+        logger.info("Token验证成功，用户名: %s", username)
+        
+        # 获取用户信息
+        user = await get_user(db, username)
+        if not user:
+            logger.error("找不到用户: %s", username)
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        logger.info("获取到用户ID: %s", user.id)
+        
+        # 生成唯一的客户端ID
+        client_id = str(uuid.uuid4())
+        logger.info("生成客户端ID: %s", client_id)
+        
+        # 接受WebSocket连接
         try:
-            # 从查询参数中获取token
-            token = websocket.query_params.get('token')
-            print(f"从查询参数获取到token: {token[:20]}...")
-            if not token:
-                # 从headers中获取token
-                auth_header = websocket.headers.get('authorization')
-                if auth_header and auth_header.startswith('Bearer '):
-                    token = auth_header.split(' ')[1]
-                    print("从header获取到token")
+            await websocket.accept()
+            logger.info("WebSocket连接已接受")
+        except Exception as accept_error:
+            logger.error("接受WebSocket连接失败: %s", str(accept_error))
+            return
+            
+        await manager.connect(websocket, client_id)
+        
+        try:
+            while True:
+                message = await websocket.receive_text()
+                logger.info("收到消息: %s", message[:100])
+                await manager.process_message(message, client_id, user.id, db)
+        except WebSocketDisconnect:
+            logger.info("WebSocket连接断开")
+            if client_id:
+                manager.disconnect(client_id)
         except Exception as e:
-            print(f"获取token时出错: {e}")
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-
-        if not token:
-            print("未提供token")
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-
-        try:
-            # 验证token
-            print("开始验证token...")
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            username = payload.get("sub")
-            if not username:
-                print("token中没有用户名")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                return
+            logger.error("WebSocket处理发生错误: %s", str(e))
+            if client_id:
+                manager.disconnect(client_id)
             
-            print(f"token验证成功，用户名: {username}")
-            
-            # 获取用户ID
-            user = await db.execute(
-                select(User).where(User.username == username)
-            )
-            user = user.scalar_one_or_none()
-            if not user:
-                print(f"找不到用户: {username}")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                return
-                
-            user_id = user.id
-            print(f"获取到用户ID: {user_id}")
-            
-            # 连接到manager
-            await manager.connect(websocket, client_id)
-            print(f"WebSocket连接已添加到manager: {client_id}")
-            
-            try:
-                while True:
-                    try:
-                        message = await websocket.receive_text()
-                        print(f"收到消息: {message[:100]}...")
-                        
-                        try:
-                            await manager.process_message(message, client_id, user_id, db)
-                        except Exception as process_error:
-                            print(f"处理消息时出错: {str(process_error)}")
-                            error_message = f"处理消息时出错: {str(process_error)}"
-                            await websocket.send_text(error_message)
-                            
-                    except WebSocketDisconnect:
-                        print(f"WebSocket断开连接: {client_id}")
-                        manager.disconnect(client_id)
-                        break
-                        
-                    except Exception as receive_error:
-                        print(f"接收消息时出错: {str(receive_error)}")
-                        if not isinstance(receive_error, WebSocketDisconnect):
-                            try:
-                                await websocket.send_text(f"接收消息时出错: {str(receive_error)}")
-                            except:
-                                pass
-                
-            except Exception as ws_error:
-                print(f"WebSocket处理循环出错: {str(ws_error)}")
-                raise
-                
-        except JWTError as e:
-            print(f"token验证失败: {e}")
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-            
-    except WebSocketDisconnect:
-        print(f"WebSocket断开连接: {client_id}")
-        manager.disconnect(client_id)
+    except JWTError as jwt_error:
+        logger.error("Token验证失败: %s", str(jwt_error))
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
     except Exception as e:
-        print(f"WebSocket处理发生错误: {e}")
-        if client_id in manager.active_connections:
+        logger.error("WebSocket endpoint错误: %s", str(e))
+        if client_id:
             manager.disconnect(client_id)
+        try:
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        except:
+            pass
 
 # 启动事件
 @app.on_event("startup")
