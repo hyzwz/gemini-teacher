@@ -1,58 +1,27 @@
 class VoiceChat {
     constructor() {
-        console.log('VoiceChat 初始化...');
         this.state = {
+            isRecording: false,
             isGeminiSpeaking: false,
-            isUserSpeaking: false,
             audioContext: null,
-            mediaRecorder: null,
-            websocket: null,
             audioWorklet: null,
-            isAudioContextInitialized: false
+            audioQueue: [], // 存储音频数据
+            silenceTimer: null, // 用于检测停顿
+            lastAudioTime: 0, // 上次接收到音频的时间
+            websocket: null // WebSocket连接
         };
         
-        // 音频配置
         this.config = {
             sampleRate: 16000,
             channelCount: 1,
-            bitsPerSample: 16,
-            WS_URL: `${config.endpoints.ws}${config.endpoints.ws_endpoint}`
+            silenceThreshold: 0.01, // 静音阈值
+            silenceTimeout: 1000 // 停顿超过1秒认为说话结束
         };
-        console.log('配置信息:', this.config);
-        
+
+        // 设置事件监听器
         this.setupEventListeners();
     }
-    
-    async initializeAudioContext() {
-        console.log('初始化音频上下文...');
-        if (this.state.isAudioContextInitialized) {
-            console.log('音频上下文已经初始化');
-            return;
-        }
-        
-        try {
-            this.state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                sampleRate: this.config.sampleRate
-            });
-            
-            // 确保 AudioContext 已经启动
-            if (this.state.audioContext.state === 'suspended') {
-                await this.state.audioContext.resume();
-            }
-            console.log('音频上下文创建成功，状态:', this.state.audioContext.state);
-            
-            // 加载音频处理工作线程
-            console.log('加载音频处理工作线程...');
-            await this.state.audioContext.audioWorklet.addModule('/static/js/audio-processor.js');
-            console.log('音频处理工作线程加载成功');
-            
-            this.state.isAudioContextInitialized = true;
-        } catch (error) {
-            console.error('初始化音频上下文失败:', error);
-            throw error;
-        }
-    }
-    
+
     setupEventListeners() {
         console.log('设置事件监听器...');
         const loginButton = document.getElementById('loginButton');
@@ -66,8 +35,7 @@ class VoiceChat {
             return;
         }
         
-        console.log('找到所有必要的DOM元素');
-        
+        // 登录按钮事件
         loginButton.addEventListener('click', async (e) => {
             console.log('点击登录按钮');
             e.preventDefault();
@@ -77,37 +45,32 @@ class VoiceChat {
             formData.append('password', document.getElementById('password').value);
             
             try {
-                // 使用 config.js 中定义的端点
                 const response = await fetch(`${config.endpoints.base}${config.endpoints.login}`, {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: new URLSearchParams(formData)  // 转换为 URL 编码格式
                 });
                 
                 if (response.ok) {
                     const data = await response.json();
-                    // 将 token 保存到 localStorage
                     const tokenData = {
                         token: data.access_token,
-                        expires: new Date().getTime() + (24 * 60 * 60 * 1000) // 1天后过期
+                        expires: new Date().getTime() + (24 * 60 * 60 * 1000)
                     };
                     localStorage.setItem('userToken', JSON.stringify(tokenData));
                     
-                    // 切换到聊天界面
                     loginContainer.classList.add('hidden');
                     chatContainer.classList.remove('hidden');
-                    console.log('切换到聊天界面');
                     
                     // 登录后建立WebSocket连接
                     try {
-                        console.log('登录后建立WebSocket连接...');
                         await this.setupWebSocket();
-                        console.log('WebSocket连接建立成功');
                     } catch (error) {
                         console.error('建立WebSocket连接失败:', error);
                     }
                 } else {
-                    console.error('登录失败');
-                    // 显示错误信息
                     const errorMsg = await response.text();
                     alert('登录失败: ' + errorMsg);
                 }
@@ -116,53 +79,90 @@ class VoiceChat {
                 alert('登录请求失败');
             }
         });
-        
-        let isRecording = false;
+
+        // 录音按钮事件
         recordButton.addEventListener('click', async () => {
             try {
-                if (!isRecording) {
-                    // 开始录音
-                    console.log('开始录音');
-                    recordButton.classList.add('recording');
-                    recordButton.querySelector('i').className = 'fas fa-stop'; // 改变图标
+                if (!this.state.isRecording) {
                     await this.startListening();
-                    isRecording = true;
                 } else {
-                    // 停止录音
-                    console.log('停止录音');
-                    recordButton.classList.remove('recording');
-                    recordButton.querySelector('i').className = 'fas fa-microphone'; // 恢复图标
                     await this.stopListening();
-                    isRecording = false;
                 }
             } catch (error) {
                 console.error('处理录音按钮点击事件时出错:', error);
-                recordButton.classList.remove('recording');
-                recordButton.querySelector('i').className = 'fas fa-microphone';
-                isRecording = false;
             }
         });
-        
-        console.log('事件监听器设置完成');
     }
-    
+
+    updateUI(status) {
+        const recordButton = document.getElementById('recordButton');
+        const statusText = document.getElementById('statusText');
+        
+        if (!recordButton || !statusText) return;
+        
+        switch(status) {
+            case 'user-speaking':
+                recordButton.classList.add('recording');
+                statusText.textContent = '正在录音...';
+                break;
+            case 'waiting':
+                recordButton.classList.remove('recording');
+                statusText.textContent = '正在处理...';
+                break;
+            case 'gemini-speaking':
+                recordButton.classList.remove('recording');
+                statusText.textContent = 'Gemini正在回复...';
+                break;
+            case 'ready':
+                recordButton.classList.remove('recording');
+                statusText.textContent = '点击开始对话';
+                break;
+            case 'error':
+                recordButton.classList.remove('recording');
+                statusText.textContent = '发生错误';
+                break;
+        }
+    }
+
     async startListening() {
         if (this.state.isGeminiSpeaking) {
             console.log('请等待Gemini回复完成');
             return;
         }
-        
+
         try {
-            // 初始化音频
+            // 初始化音频上下文
             await this.initializeAudioContext();
             
+            // 获取麦克风权限
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    channelCount: this.config.channelCount,
+                    sampleRate: this.config.sampleRate
+                }
+            });
+            
+            const audioInput = this.state.audioContext.createMediaStreamSource(stream);
+            
+            // 创建音频处理节点
+            await this.state.audioContext.audioWorklet.addModule('/static/js/audio-processor.js');
+            this.state.audioWorklet = new AudioWorkletNode(this.state.audioContext, 'audio-processor');
+            
+            // 处理音频数据
+            this.state.audioWorklet.port.onmessage = (event) => {
+                if (event.data.type === 'audio') {
+                    this.handleAudioData(event.data.buffer);
+                }
+            };
+            
+            audioInput.connect(this.state.audioWorklet);
+            this.state.isRecording = true;
+            
             // 发送开始命令
-            if (this.state.websocket && this.state.websocket.readyState === WebSocket.OPEN) {
+            if (this.state.websocket?.readyState === WebSocket.OPEN) {
                 this.state.websocket.send(JSON.stringify({ type: 'start' }));
             }
             
-            // 开始录音逻辑...
-            this.state.isUserSpeaking = true;
             this.updateUI('user-speaking');
             
         } catch (error) {
@@ -170,7 +170,109 @@ class VoiceChat {
             this.updateUI('error');
         }
     }
-    
+
+    async stopListening() {
+        try {
+            this.state.isRecording = false;
+            
+            // 断开音频处理
+            if (this.state.audioWorklet) {
+                this.state.audioWorklet.disconnect();
+                this.state.audioWorklet = null;
+            }
+            
+            // 关闭音频上下文
+            if (this.state.audioContext) {
+                await this.state.audioContext.close();
+                this.state.audioContext = null;
+            }
+            
+            // 发送停止命令
+            if (this.state.websocket?.readyState === WebSocket.OPEN) {
+                this.state.websocket.send(JSON.stringify({ type: 'stop' }));
+            }
+            
+            this.updateUI('ready');
+            
+        } catch (error) {
+            console.error('停止录音时出错:', error);
+            this.updateUI('error');
+        }
+    }
+
+    handleAudioData(buffer) {
+        if (this.state.isGeminiSpeaking) return;
+        
+        const volume = this.calculateVolume(buffer);
+        this.state.lastAudioTime = Date.now();
+        
+        if (volume > this.config.silenceThreshold) {
+            // 有声音，添加到队列
+            this.state.audioQueue.push(buffer);
+            // 重置停顿检测
+            if (this.state.silenceTimer) {
+                clearTimeout(this.state.silenceTimer);
+            }
+            this.state.silenceTimer = setTimeout(() => this.handleSilence(), this.config.silenceTimeout);
+        }
+    }
+
+    async handleSilence() {
+        if (this.state.audioQueue.length > 0) {
+            // 将累积的音频发送给服务器
+            const audioData = this.concatenateAudioBuffers(this.state.audioQueue);
+            await this.sendAudioToServer(audioData);
+            this.state.audioQueue = []; // 清空队列
+        }
+    }
+
+    async checkAutoLogin() {
+        try {
+            const tokenData = JSON.parse(localStorage.getItem('userToken'));
+            if (tokenData && tokenData.token) {
+                // 检查 token 是否过期
+                if (new Date().getTime() < tokenData.expires) {
+                    console.log('发��有效的登录状态，正在自动登录...');
+                    
+                    // 验证 token 是否有效
+                    const response = await fetch(`${config.endpoints.base}/verify_token`, {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${tokenData.token}`
+                        }
+                    });
+                    
+                    if (response.ok) {
+                        // token 有效，切换到聊天界面
+                        const loginContainer = document.getElementById('loginContainer');
+                        const chatContainer = document.getElementById('chatContainer');
+                        loginContainer.classList.add('hidden');
+                        chatContainer.classList.remove('hidden');
+                        
+                        // 建立WebSocket连接
+                        try {
+                            await this.setupWebSocket();
+                            console.log('自动登录成功');
+                        } catch (error) {
+                            console.error('建立WebSocket连接失败:', error);
+                        }
+                    } else {
+                        // token 无效，清除并保持在登录界面
+                        console.log('Token无效，需要重新登录');
+                        localStorage.removeItem('userToken');
+                    }
+                } else {
+                    // token 已过期，清除
+                    console.log('Token已过期，需要重新登录');
+                    localStorage.removeItem('userToken');
+                }
+            }
+        } catch (error) {
+            console.error('自动登录检查失败:', error);
+            localStorage.removeItem('userToken');
+        }
+    }
+
     async setupWebSocket() {
         try {
             const tokenData = JSON.parse(localStorage.getItem('userToken'));
@@ -178,9 +280,11 @@ class VoiceChat {
                 throw new Error('No authentication token found');
             }
 
-            const wsUrl = `${config.endpoints.ws}${config.endpoints.ws_endpoint}?token=${tokenData.token}`;
-            this.state.websocket = new WebSocket(wsUrl);
+            const wsUrl = `${config.endpoints.ws}/ws/audio?token=${tokenData.token}`;
+            console.log('正在连接WebSocket...', wsUrl);
             
+            this.state.websocket = new WebSocket(wsUrl);
+
             // 添加连接状态处理
             this.state.websocket.onopen = () => {
                 console.log('WebSocket连接建立成功');
@@ -243,54 +347,77 @@ class VoiceChat {
             throw error;
         }
     }
-    
+
+    // 添加连接状态更新方法
     updateConnectionStatus(status) {
-        const statusElement = document.getElementById('connectionStatus');
-        const textElement = document.getElementById('connectionText');
-        
-        // 移除所有状态类
-        statusElement.classList.remove('status-connected', 'status-disconnected', 'status-connecting');
-        
-        // 添加新状态类
-        statusElement.classList.add(`status-${status}`);
-        
-        // 更新状态文本
-        const statusTexts = {
-            connected: '已连接',
-            disconnected: '未连接',
-            connecting: '连接中'
-        };
-        textElement.textContent = statusTexts[status];
+        const indicator = document.querySelector('.connection-status');
+        if (indicator) {
+            indicator.className = `connection-status status-${status}`;
+        }
     }
-    
-    async sendAudioChunk(buffer) {
-        if (!this.state.websocket || this.state.websocket.readyState !== WebSocket.OPEN || this.state.isGeminiSpeaking) {
-            console.log('无法发送音频数据');
+
+    async initializeAudioContext() {
+        console.log('初始化音频上下文...');
+        if (this.state.audioContext) {
+            console.log('音频上下文已经初始化');
             return;
         }
         
         try {
-            // 将 Int16Array 转换为 Uint8Array
-            const uint8Array = new Uint8Array(buffer);
-            const blob = new Blob([uint8Array], { type: 'audio/pcm' });
+            this.state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: this.config.sampleRate
+            });
             
-            // 创建 FileReader 来读取 blob
-            const reader = new FileReader();
-            reader.onload = async () => {
-                try {
-                    const arrayBuffer = reader.result;
-                    await this.state.websocket.send(arrayBuffer);
-                    console.log('发送音频数据成功');
-                } catch (error) {
-                    console.error('发送音频数据失败:', error);
-                }
-            };
-            reader.readAsArrayBuffer(blob);
+            // 确保 AudioContext 已经启动
+            if (this.state.audioContext.state === 'suspended') {
+                await this.state.audioContext.resume();
+            }
+            
+            console.log('音频上下文初始化成功');
         } catch (error) {
-            console.error('处理音频数据失败:', error);
+            console.error('初始化音频上下文时出错:', error);
+            throw error;
         }
     }
-    
+
+    calculateVolume(buffer) {
+        // 计算音频数据的音量
+        const samples = new Float32Array(buffer);
+        let sum = 0;
+        for (let i = 0; i < samples.length; i++) {
+            sum += samples[i] * samples[i];
+        }
+        return Math.sqrt(sum / samples.length);
+    }
+
+    concatenateAudioBuffers(buffers) {
+        // 合并音频缓冲区
+        const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+        const result = new Float32Array(totalLength);
+        let offset = 0;
+        
+        for (const buffer of buffers) {
+            result.set(new Float32Array(buffer), offset);
+            offset += buffer.length;
+        }
+        
+        return result.buffer;
+    }
+
+    async sendAudioToServer(audioData) {
+        if (!this.state.websocket || this.state.websocket.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket未连接');
+            return;
+        }
+        
+        try {
+            // 发送音频数据
+            this.state.websocket.send(audioData);
+        } catch (error) {
+            console.error('发送音频数据时出错:', error);
+        }
+    }
+
     async handleGeminiResponse(audioData) {
         if (!audioData) {
             console.error('收到空的音频响应');
@@ -301,120 +428,30 @@ class VoiceChat {
             this.state.isGeminiSpeaking = true;
             console.log('开始播放Gemini响应');
             
-            // 解码音频数据
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const audioBuffer = await audioContext.decodeAudioData(audioData);
             
-            // 创建音频源
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(audioContext.destination);
             
-            // 监听播放完成
             source.onended = () => {
                 console.log('Gemini响应播放完成');
                 this.state.isGeminiSpeaking = false;
                 audioContext.close();
             };
             
-            // 开始播放
             await source.start();
-            console.log('开始播放音频响应');
             
         } catch (error) {
             console.error('播放音频响应失败:', error);
             this.state.isGeminiSpeaking = false;
         }
     }
-    
-    async stopListening() {
-        try {
-            // 发送停止命令
-            if (this.state.websocket && this.state.websocket.readyState === WebSocket.OPEN) {
-                this.state.websocket.send(JSON.stringify({ type: 'stop' }));
-            }
-            
-            // 停止录音逻辑...
-            this.state.isUserSpeaking = false;
-            this.updateUI('waiting');
-            
-        } catch (error) {
-            console.error('停止录音时出错:', error);
-            this.updateUI('error');
-        }
-    }
-    
-    updateUI(status) {
-        const indicator = document.getElementById('speakingIndicator');
-        const statusText = document.getElementById('statusText');
-        
-        switch(status) {
-            case 'gemini-speaking':
-                indicator.className = 'indicator gemini';
-                statusText.textContent = 'Gemini正在说话...';
-                break;
-            case 'ready-to-speak':
-                indicator.className = 'indicator ready';
-                statusText.textContent = '请开始说话';
-                break;
-            case 'user-speaking':
-                indicator.className = 'indicator user';
-                statusText.textContent = '正在收听...';
-                break;
-            case 'waiting':
-                indicator.className = 'indicator';
-                statusText.textContent = '正在处理...';
-                break;
-            case 'error':
-                indicator.className = 'indicator error';
-                statusText.textContent = '发生错误';
-                break;
-            case '已连接':
-                indicator.className = 'indicator connected';
-                statusText.textContent = '已连接';
-                break;
-            case '连接错误':
-                indicator.className = 'indicator error';
-                statusText.textContent = '连接错误';
-                break;
-            case '未连接':
-                indicator.className = 'indicator disconnected';
-                statusText.textContent = '未连接';
-                break;
-        }
-    }
-    
-    // 添加页面加载时的自动登录检查
-    async checkAutoLogin() {
-        const tokenData = JSON.parse(localStorage.getItem('userToken'));
-        if (tokenData && tokenData.token) {
-            // 检查 token 是否过期
-            if (new Date().getTime() < tokenData.expires) {
-                // token 未过期，直接显示聊天界面
-                const loginContainer = document.getElementById('loginContainer');
-                const chatContainer = document.getElementById('chatContainer');
-                loginContainer.classList.add('hidden');
-                chatContainer.classList.remove('hidden');
-                
-                // 自动建立WebSocket连接
-                try {
-                    console.log('自动建立WebSocket连接...');
-                    await this.setupWebSocket();
-                    console.log('WebSocket连接建立成功');
-                } catch (error) {
-                    console.error('建立WebSocket连接失败:', error);
-                }
-            } else {
-                // token 已过期，清除并保持在登录界面
-                localStorage.removeItem('userToken');
-            }
-        }
-    }
 }
 
-// 修改初始化代码
+// 初始化
 document.addEventListener('DOMContentLoaded', async () => {
     window.voiceChat = new VoiceChat();
-    // 检查动登录
     await window.voiceChat.checkAutoLogin();
 });
