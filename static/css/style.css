@@ -23,6 +23,24 @@ h1, h2 {
     margin-bottom: 20px;
 }
 
+.status-bar {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 5px;
+    font-size: 14px;
+}
+
+.status-bar span {
+    margin-right: 20px;
+}
+
+#connectionStatus, #recordStatus {
+    font-weight: bold;
+}
+
 .controls {
     margin: 20px 0;
     display: flex;
@@ -35,6 +53,11 @@ h1, h2 {
     border: 1px solid #ddd;
     border-radius: 5px;
     background-color: #f9f9f9;
+    transition: background-color 0.3s;
+}
+
+.message-box.new-message {
+    background-color: #e3f2fd;
 }
 
 .primary-button {
@@ -45,11 +68,17 @@ h1, h2 {
     border-radius: 5px;
     cursor: pointer;
     font-size: 16px;
+    transition: all 0.3s ease;
 }
 
 .primary-button:disabled {
     background-color: #cccccc;
     cursor: not-allowed;
+}
+
+.primary-button:hover:not(:disabled) {
+    background-color: #45a049;
+    transform: translateY(-1px);
 }
 
 .secondary-button {
@@ -60,6 +89,12 @@ h1, h2 {
     border-radius: 5px;
     cursor: pointer;
     font-size: 16px;
+    transition: all 0.3s ease;
+}
+
+.secondary-button:hover {
+    background-color: #da190b;
+    transform: translateY(-1px);
 }
 
 form {
@@ -70,14 +105,20 @@ form {
 }
 
 input {
-    padding: 10px;
+    padding: 12px;
     border: 1px solid #ddd;
     border-radius: 5px;
     font-size: 16px;
+    transition: border-color 0.3s;
+}
+
+input:focus {
+    border-color: #4CAF50;
+    outline: none;
 }
 
 button {
-    transition: background-color 0.3s;
+    transition: all 0.3s ease;
 }
 
 button:hover {
@@ -87,8 +128,27 @@ button:hover {
 a {
     color: #2196F3;
     text-decoration: none;
+    transition: color 0.3s;
 }
 
 a:hover {
+    color: #0d47a1;
     text-decoration: underline;
+}
+
+.display {
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #fff;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.new-message {
+    animation: fadeIn 0.3s ease-in-out;
 }

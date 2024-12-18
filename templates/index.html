@@ -14,7 +14,7 @@
                 <input type="password" id="password" placeholder="密码" required>
                 <button type="submit">登录</button>
             </form>
-            <p>还没有账号？ <a href="#" onclick="showRegister()">注册</a></p>
+            <p>还没有账号？ <a href="#" id="showRegister">注册</a></p>
         </div>
 
         <div id="registerSection" class="section" style="display: none;">
@@ -25,11 +25,15 @@
                 <input type="password" id="regPassword" placeholder="密码" required>
                 <button type="submit">注册</button>
             </form>
-            <p>已有账号？ <a href="#" onclick="showLogin()">登录</a></p>
+            <p>已有账号？ <a href="#" id="showLogin">登录</a></p>
         </div>
 
         <div id="mainSection" class="section" style="display: none;">
             <h1>英语学习助手</h1>
+            <div class="status-bar">
+                <span>连接状态: <span id="connectionStatus">未连接</span></span>
+                <span>录音状态: <span id="recordStatus">就绪</span></span>
+            </div>
             <div class="controls">
                 <button id="startRecord" class="primary-button">开始录音</button>
                 <button id="stopRecord" class="primary-button" disabled>停止录音</button>
@@ -41,7 +45,6 @@
             <button id="logout" class="secondary-button">登出</button>
         </div>
     </div>
-
     <script>
         let token = '';
         let ws = null;
@@ -66,10 +69,11 @@
             const password = document.getElementById('password').value;
 
             try {
-                const response = await axios.post('/token', {
-                    username: username,
-                    password: password
-                }, {
+                const formData = new URLSearchParams();
+                formData.append('username', username);
+                formData.append('password', password);
+
+                const response = await axios.post('/token', formData, {
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded'
                     }
@@ -91,10 +95,15 @@
             const password = document.getElementById('regPassword').value;
 
             try {
-                await axios.post('/register', {
-                    username: username,
-                    email: email,
-                    password: password
+                const formData = new FormData();
+                formData.append('username', username);
+                formData.append('email', email);
+                formData.append('password', password);
+
+                await axios.post('/register', formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data'
+                    }
                 });
                 alert('注册成功！请登录');
                 showLogin();
@@ -113,7 +122,7 @@
         // WebSocket初始化
         function initializeWebSocket() {
             const clientId = 'user_' + Math.random().toString(36).substr(2, 9);
-            ws = new WebSocket(`ws://${window.location.host}/ws/${clientId}`);
+            ws = new WebSocket(`ws://${window.location.host}/ws/${clientId}?token=${token}`);
             
             ws.onmessage = (event) => {
                 document.getElementById('feedback').innerText = 'Gemini反馈：' + event.data;
@@ -122,6 +131,10 @@
             ws.onclose = () => {
                 console.log('WebSocket连接断开，尝试重连...');
                 setTimeout(initializeWebSocket, 3000);
+            };
+
+            ws.onopen = () => {
+                document.getElementById('connectionStatus').innerText = '已连接';
             };
         }
 
@@ -139,6 +152,7 @@
                 mediaRecorder.start();
                 document.getElementById('startRecord').disabled = true;
                 document.getElementById('stopRecord').disabled = false;
+                document.getElementById('recordStatus').innerText = '录音中';
             } catch (error) {
                 alert('无法访问麦克风：' + error);
             }
@@ -148,6 +162,7 @@
             mediaRecorder.stop();
             document.getElementById('startRecord').disabled = false;
             document.getElementById('stopRecord').disabled = true;
+            document.getElementById('recordStatus').innerText = '就绪';
 
             mediaRecorder.onstop = async () => {
                 const audioBlob = new Blob(audioChunks);
@@ -167,6 +182,45 @@
             }
             document.getElementById('loginSection').style.display = 'block';
             document.getElementById('mainSection').style.display = 'none';
+        };
+
+        // 等待页面加载完成后初始化应用
+        window.onload = () => {
+            // 设置 axios 默认配置
+            axios.defaults.baseURL = 'http://localhost:8081';
+            
+            // 添加请求拦截器，自动添加token
+            axios.interceptors.request.use(function (config) {
+                if (token) {
+                    config.headers.Authorization = `Bearer ${token}`;
+                }
+                return config;
+            }, function (error) {
+                return Promise.reject(error);
+            });
+
+            // 添加响应拦截器，处理401错误
+            axios.interceptors.response.use(function (response) {
+                return response;
+            }, function (error) {
+                if (error.response && error.response.status === 401) {
+                    // token过期或无效，重定向到登录页面
+                    token = '';
+                    showLogin();
+                }
+                return Promise.reject(error);
+            });
+
+            // 添加注册和登录切换的事件监听
+            document.getElementById('showRegister').addEventListener('click', (e) => {
+                e.preventDefault();
+                showRegister();
+            });
+            
+            document.getElementById('showLogin').addEventListener('click', (e) => {
+                e.preventDefault();
+                showLogin();
+            });
         };
     </script>
 </body>
