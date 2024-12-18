@@ -9,19 +9,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from models import User
 from database import get_db
+import logging
 
 # 配置信息
 SECRET_KEY = "your-secret-key-keep-it-secret"  # 在生产环境中应该使用环境变量
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24小时 = 1440分钟
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 使用默认的 bcrypt 配置
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12  # 设置加密轮数
+)
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        logger.error(f"密码验证出错: {str(e)}")
+        return False
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 async def authenticate_user(db: AsyncSession, username: str, password: str):

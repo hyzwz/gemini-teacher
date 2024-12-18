@@ -264,30 +264,88 @@ async def websocket_endpoint(
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
 
 @app.websocket("/ws/audio")
-async def websocket_audio_endpoint(websocket: WebSocket):
-    logger.info("收到新的WebSocket连接请求")
-    await websocket.accept()
-    logger.info("WebSocket连接已接受")
-    
-    gemini_service = GeminiService()
-    
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
     try:
-        # 设置Gemini连接
-        logger.info("正在设置Gemini连接...")
-        await gemini_service.setup_connection(websocket)
-        logger.info("Gemini连接设置成功")
+        # 验证 token
+        logger.info(f"验证token: {token[:10]}...")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            logger.error("无效的token")
+            await websocket.close(code=4001, reason="Invalid authentication token")
+            return
+            
+        # 获取用户信息
+        user = await get_user(db, username)
+        if not user:
+            logger.error(f"找不到用户: {username}")
+            await websocket.close(code=4001, reason="User not found")
+            return
+            
+        await websocket.accept()
+        logger.info(f"用户 {username} 的WebSocket连接已建立")
         
-        # 处理音频流
-        logger.info("开始处理音频流...")
-        await gemini_service.handle_audio_stream(websocket)
+        gemini_service = GeminiService()
+        connection_active = True
         
-    except ConnectionClosed:
-        logger.info("WebSocket连接断开")
-    except Exception as e:
-        logger.error(f"处理WebSocket连接时出错: {str(e)}")
-        await websocket.close()
+        try:
+            await gemini_service.setup_connection(websocket)
+            logger.info(f"用户 {username} 的Gemini连接已建立")
+            
+            # 处理音频流
+            while connection_active:
+                try:
+                    data = await websocket.receive()
+                    logger.debug(f"收到原始数据: {data}")
+                    
+                    if data.get('type') == 'websocket.disconnect':
+                        logger.info(f"用户 {username} 主动断开连接")
+                        connection_active = False
+                        break
+                        
+                    if isinstance(data, dict):
+                        if data.get('type') == 'websocket.receive':
+                            audio_bytes = data.get('bytes')
+                            if audio_bytes:
+                                logger.info(f"收到音频数据，大小: {len(audio_bytes)} bytes")
+                                await gemini_service.handle_audio_data(audio_bytes, websocket)
+                            else:
+                                logger.warning("收到空的音频数据")
+                        else:
+                            logger.info(f"收到控制命令: {data}")
+                            await gemini_service.handle_audio_data(data, websocket)
+                            
+                except WebSocketDisconnect:
+                    logger.info(f"用户 {username} 的WebSocket连接已断开")
+                    connection_active = False
+                    break
+                except RuntimeError as e:
+                    if "disconnect message has been received" in str(e):
+                        logger.info(f"用户 {username} 的连接已关闭")
+                        connection_active = False
+                        break
+                    raise
+                    
+        except Exception as e:
+            logger.error(f"处理用户 {username} 的音频流时出错: {str(e)}")
+            logger.exception(e)
+            
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 # 启动事件
 @app.on_event("startup")
 async def startup_event():
     await init_db()
+
+@app.get("/verify_token")
+async def verify_token(current_user: User = Depends(get_current_user)):
+    """验证token是否有效"""
+    return {"status": "valid", "username": current_user.username}

@@ -48,6 +48,8 @@ uri = f"wss://{host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.B
 class AudioLoop:
     def __init__(self):
         self.ws: Connection
+        # 用于存储麦克风采集到的音频数据
+        # 由于 PyAudio  library 是 blocking 的，所以需要使用 asyncio.Queue 来避免阻塞
         self.audio_out_queue = asyncio.Queue()
         self.running_step = 0
 
