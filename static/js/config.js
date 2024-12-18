@@ -3,9 +3,9 @@ const config = {
     endpoints: {
         base: 'http://127.0.0.1:8081',
         ws: 'ws://127.0.0.1:8081',
-        login: '/token',  // 修改为正确的登录端点
+        login: '/token',
         register: '/register',
-        ws_endpoint: '/ws'
+        ws_endpoint: '/ws/audio'
     },
 
     // WebSocket配置

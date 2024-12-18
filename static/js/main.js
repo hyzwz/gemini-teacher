@@ -3,38 +3,101 @@ class AudioRecorder {
         this.mediaRecorder = null;
         this.audioChunks = [];
         this.isRecording = false;
+        this.audioContext = null;
+        this.audioProcessor = null;
+        this.ws = null;
     }
 
     async start() {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            this.mediaRecorder = new MediaRecorder(stream);
-            this.audioChunks = [];
+            await this.setupAudioContext();
             
-            this.mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    this.audioChunks.push(event.data);
+            // 使用配置文件中的WebSocket URL
+            const wsUrl = `${config.endpoints.ws}${config.endpoints.ws_endpoint}`;
+            this.ws = new WebSocket(wsUrl);
+            
+            this.ws.onmessage = async function(event) {
+                const response = JSON.parse(event.data);
+                
+                if (response.text) {
+                    // 显示文本响应
+                    displayResponse(response.text);
+                }
+                
+                if (response.audio) {
+                    // 播放音频响应
+                    const audioData = base64ToFloat32Array(response.audio);
+                    await playAudioResponse(audioData);
                 }
             };
-
-            this.mediaRecorder.start();
+            
+            // 设置音频处理回调
+            this.audioProcessor.onaudioprocess = function(e) {
+                if (!this.isRecording) return;
+                
+                const inputData = e.inputBuffer.getChannelData(0);
+                const audioData = convertFloat32ToInt16(inputData);
+                const base64Data = arrayBufferToBase64(audioData.buffer);
+                
+                if (this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({
+                        audio_data: base64Data,
+                        is_binary: true
+                    }));
+                }
+            }.bind(this);
+            
             this.isRecording = true;
+            updateRecordingStatus('正在录音...');
+            animateRecordButton(true);
         } catch (error) {
-            console.error('录音启动失败:', error);
-            throw error;
+            console.error('启动录音失败:', error);
+            updateRecordingStatus('录音启动失败');
+            this.isRecording = false;
         }
     }
 
-    stop() {
-        return new Promise((resolve) => {
-            this.mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(this.audioChunks, { type: 'audio/wav' });
-                this.isRecording = false;
-                resolve(audioBlob);
-            };
-            this.mediaRecorder.stop();
-            this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
-        });
+    async stop() {
+        try {
+            this.isRecording = false;
+            updateRecordingStatus('停止录音');
+            animateRecordButton(false);
+            
+            if (this.ws) {
+                this.ws.close();
+            }
+            
+            if (this.audioProcessor) {
+                this.audioProcessor.disconnect();
+                this.audioProcessor = null;
+            }
+            
+            if (this.audioContext) {
+                await this.audioContext.close();
+                this.audioContext = null;
+            }
+        } catch (error) {
+            console.error('停止录音失败:', error);
+            updateRecordingStatus('停止录音失败');
+        }
+    }
+
+    async setupAudioContext() {
+        try {
+            this.audioContext = new AudioContext({ sampleRate: 16000 });
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const source = this.audioContext.createMediaStreamSource(stream);
+            
+            // 创建音频处理节点
+            this.audioProcessor = this.audioContext.createScriptProcessor(2048, 1, 1);
+            source.connect(this.audioProcessor);
+            this.audioProcessor.connect(this.audioContext.destination);
+            
+            return true;
+        } catch (error) {
+            console.error('设置音频上下文失败:', error);
+            return false;
+        }
     }
 }
 
@@ -191,12 +254,12 @@ class App {
     }
 
     setupEventListeners() {
-        // 登录按钮处理
+        // 登录表单提交
         document.getElementById('loginBtn').addEventListener('click', () => {
             this.handleLogin();
         });
 
-        // 注册按钮处理
+        // 注册表单提交
         document.getElementById('registerBtn').addEventListener('click', () => {
             this.handleRegister();
         });
@@ -214,12 +277,20 @@ class App {
         });
 
         // 录音按钮处理
-        document.getElementById('startRecordBtn').addEventListener('click', () => {
-            this.startRecording();
-        });
-
-        document.getElementById('stopRecordBtn').addEventListener('click', () => {
-            this.stopRecording();
+        const recordButton = document.getElementById('recordButton');
+        recordButton.addEventListener('click', async () => {
+            if (!this.recorder.isRecording) {
+                try {
+                    await this.startRecording();
+                    recordButton.classList.add('recording');
+                } catch (error) {
+                    console.error('启动录音失败:', error);
+                    alert('无法启动录音，请确保已授予麦克风权限。');
+                }
+            } else {
+                await this.stopRecording();
+                recordButton.classList.remove('recording');
+            }
         });
 
         // 登出按钮处理
@@ -332,29 +403,32 @@ class App {
     }
 
     async startRecording() {
+        const recordingStatus = document.getElementById('recordingStatus');
         try {
             await this.recorder.start();
-            document.getElementById('startRecordBtn').classList.add('hidden');
-            document.getElementById('stopRecordBtn').classList.remove('hidden');
-            document.getElementById('recordingStatus').textContent = '正在录音...';
+            recordingStatus.textContent = '正在录音...';
         } catch (error) {
             console.error('录音启动失败:', error);
-            alert('无法启动录音，请检查麦克风权限');
+            recordingStatus.textContent = '无法启动录音，请确保已授予麦克风权限';
+            throw error;
         }
     }
 
     async stopRecording() {
+        const recordingStatus = document.getElementById('recordingStatus');
         try {
-            const audioBlob = await this.recorder.stop();
-            document.getElementById('startRecordBtn').classList.remove('hidden');
-            document.getElementById('stopRecordBtn').classList.add('hidden');
-            document.getElementById('recordingStatus').textContent = '';
+            await this.recorder.stop();
+            recordingStatus.textContent = '';
             
             this.chatUI.showLoading();
-            await this.wsClient.sendAudio(audioBlob);
+            if (this.wsClient) {
+                // await this.wsClient.sendAudio(audioBlob);
+            }
+            this.chatUI.removeLoading();
         } catch (error) {
             console.error('录音停止失败:', error);
-            alert('录音处理过程中发生错误');
+            recordingStatus.textContent = '录音停止失败';
+            throw error;
         }
     }
 
@@ -366,6 +440,70 @@ class App {
         } else {
             this.showLoginInterface();
         }
+    }
+}
+
+// 辅助函数
+function convertFloat32ToInt16(float32Array) {
+    const int16Array = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return int16Array;
+}
+
+function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+}
+
+function base64ToFloat32Array(base64) {
+    const binary = window.atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return new Float32Array(bytes.buffer);
+}
+
+async function playAudioResponse(audioData) {
+    const buffer = new AudioContext().createBuffer(1, audioData.length, 16000);
+    buffer.copyToChannel(audioData, 0);
+    
+    const source = new AudioContext().createBufferSource();
+    source.buffer = buffer;
+    source.connect(new AudioContext().destination);
+    source.start();
+}
+
+// UI更新函数
+function updateRecordingStatus(status) {
+    const statusElement = document.getElementById('recordingStatus');
+    if (statusElement) {
+        statusElement.textContent = status;
+    }
+}
+
+function animateRecordButton(isRecording) {
+    const button = document.querySelector('.record-button');
+    if (button) {
+        if (isRecording) {
+            button.classList.add('recording');
+        } else {
+            button.classList.remove('recording');
+        }
+    }
+}
+
+function displayResponse(text) {
+    const responseElement = document.getElementById('response');
+    if (responseElement) {
+        responseElement.textContent = text;
     }
 }
 

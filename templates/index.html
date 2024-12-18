@@ -82,18 +82,14 @@
                 <!-- 消息将在这里动态添加 -->
             </div>
 
-            <div class="border-t pt-4">
-                <div class="flex items-center justify-center space-x-4">
-                    <button id="startRecordBtn" class="flex items-center justify-center space-x-2 bg-blue-500 text-white py-2 px-6 rounded-full hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+            <div class="flex items-center justify-center h-32 flex-col">
+                <button id="recordButton" class="record-btn mb-2">
+                    <div class="record-btn-inner">
                         <i class="fas fa-microphone"></i>
-                        <span>开始录音</span>
-                    </button>
-                    <button id="stopRecordBtn" class="hidden flex items-center justify-center space-x-2 bg-red-500 text-white py-2 px-6 rounded-full hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
-                        <i class="fas fa-stop recording-pulse"></i>
-                        <span>停止录音</span>
-                    </button>
-                </div>
-                <div id="recordingStatus" class="text-center mt-2 text-sm text-gray-500"></div>
+                    </div>
+                    <div class="record-btn-ripple"></div>
+                </button>
+                <div id="recordingStatus" class="text-sm text-gray-500 mt-2"></div>
             </div>
         </main>
     </div>

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, Request, Form
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, Request, Form, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -30,10 +30,10 @@ from auth import (
 )
 from gemini_service import GeminiService
 from fastapi.templating import Jinja2Templates
+import base64
 
 # 加载环境变量
 load_dotenv()
-api_keys = json.loads(os.getenv("GEMINI_API_KEYS", "[]"))
 
 app = FastAPI()
 
@@ -141,124 +141,178 @@ async def register(
 # WebSocket连接管理
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: dict = {}
-        self.gemini_service = GeminiService(api_keys)
-
-    async def connect(self, websocket: WebSocket, client_id: str):
-        self.active_connections[client_id] = websocket
-        logger.info(f"客户端 {client_id} 已连接")
-
+        self.active_connections = {}
+        self.gemini_service = GeminiService()
+        
     def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
-            logger.info(f"客户端 {client_id} 已断开连接")
-
+            
     async def process_message(self, message: str, client_id: str, user_id: int, db: AsyncSession):
+        """处理来自客户端的消息"""
         try:
-            websocket = self.active_connections[client_id]
-            logger.info(f"处理来自客户端 {client_id} 的消息: {message}")
-
-            # 处理消息
-            response_text, api_key = await self.gemini_service.process_with_gemini(message)
-            
-            # 发送JSON格式的响应
-            response_data = {
-                "text": response_text,
-                "type": "gemini_response"
-            }
-            await websocket.send_json(response_data)
-            
-            # 记录用户对话
+            # 记录用户输入
             log = UserLog(
                 user_id=user_id,
-                action="chat",
-                content=f"User: {message}\nGemini: {response_text}",
-                api_key_used=api_key[-8:] if api_key else None,
-                processing_time=None
+                action="user_input",
+                content=message[:100]  # 只记录前100个字符
             )
             db.add(log)
             await db.commit()
-
+            
+            # 调用Gemini处理消息
+            response = await self.gemini_service.process_audio(message)
+            
+            if response:
+                # 发送响应给客户端
+                if client_id in self.active_connections:
+                    await self.active_connections[client_id].send_json({
+                        "text": response.text,
+                        "audio": response.audio
+                    })
+                    
+                # 记录响应日志
+                log = UserLog(
+                    user_id=user_id,
+                    action="gemini_response",
+                    content=response.text[:100] if response.text else "Audio response"
+                )
+                db.add(log)
+                await db.commit()
+                
         except Exception as e:
             logger.error(f"处理消息时出错: {str(e)}")
-            error_response = {
-                "text": f"处理消息时出错: {str(e)}",
-                "type": "error"
-            }
-            try:
-                await websocket.send_json(error_response)
-            except Exception as ws_error:
-                logger.error(f"发送错误消息失败: {str(ws_error)}")
+            if client_id in self.active_connections:
+                await self.active_connections[client_id].send_json({
+                    "error": str(e)
+                })
 
 manager = ConnectionManager()
 
-@app.websocket("/ws/{token}")
+@app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    token: str,
+    token: str = Query(...),
     db: AsyncSession = Depends(get_db)
 ):
-    client_id = None
     try:
         # 验证token
-        logger.info("开始验证token: %s", token[:10] if token else None)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if not username:
-            logger.error("Token中没有用户名")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        
-        logger.info("Token验证成功，用户名: %s", username)
-        
-        # 获取用户信息
-        user = await get_user(db, username)
-        if not user:
-            logger.error("找不到用户: %s", username)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        
-        logger.info("获取到用户ID: %s", user.id)
-        
-        # 生成唯一的客户端ID
-        client_id = str(uuid.uuid4())
-        logger.info("生成客户端ID: %s", client_id)
-        
-        # 接受WebSocket连接
-        try:
-            await websocket.accept()
-            logger.info("WebSocket连接已接受")
-        except Exception as accept_error:
-            logger.error("接受WebSocket连接失败: %s", str(accept_error))
             return
             
-        await manager.connect(websocket, client_id)
+        user = await get_user(db, username)
+        if not user:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        await websocket.accept()
+        client_id = str(uuid.uuid4())
+        manager.active_connections[client_id] = websocket
         
         try:
             while True:
-                message = await websocket.receive_text()
-                logger.info("收到消息: %s", message[:100])
-                await manager.process_message(message, client_id, user.id, db)
+                data = await websocket.receive_json()
+                
+                if data.get("type") == "audio":
+                    # 处理音频数据
+                    audio_data = base64.b64decode(data["data"])
+                    
+                    # 记录用户输入日志
+                    log = UserLog(
+                        user_id=user.id,
+                        action="audio_input",
+                        content=f"Audio input received: {len(audio_data)} bytes"
+                    )
+                    db.add(log)
+                    await db.commit()
+                    
+                    try:
+                        # 发送音频到Gemini并获取响应
+                        response = await manager.gemini_service.process_audio(audio_data)
+                        
+                        if response:
+                            # 发送响应给客户端
+                            await websocket.send_json({
+                                "type": "response",
+                                "audio": base64.b64encode(response.audio).decode() if response.audio else None,
+                                "text": response.text if response.text else None
+                            })
+                            
+                            # 记录响应日志
+                            log = UserLog(
+                                user_id=user.id,
+                                action="gemini_response",
+                                content=f"Response sent: {response.text[:100] if response.text else 'Audio only'}..."
+                            )
+                            db.add(log)
+                            await db.commit()
+                            
+                    except Exception as e:
+                        logger.error(f"处理Gemini响应时出错: {str(e)}")
+                        await websocket.send_json({
+                            "error": "处理响应时出错"
+                        })
+                        
         except WebSocketDisconnect:
-            logger.info("WebSocket连接断开")
-            if client_id:
-                manager.disconnect(client_id)
+            manager.disconnect(client_id)
+            logger.info(f"WebSocket connection closed for user: {username}")
         except Exception as e:
-            logger.error("WebSocket处理发生错误: %s", str(e))
-            if client_id:
-                manager.disconnect(client_id)
+            logger.error(f"WebSocket error: {str(e)}")
+            manager.disconnect(client_id)
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
             
-    except JWTError as jwt_error:
-        logger.error("Token验证失败: %s", str(jwt_error))
+    except JWTError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
     except Exception as e:
-        logger.error("WebSocket endpoint错误: %s", str(e))
-        if client_id:
-            manager.disconnect(client_id)
-        try:
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        except:
-            pass
+        logger.error(f"WebSocket endpoint error: {str(e)}")
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+
+@app.websocket("/ws/audio")
+async def websocket_audio_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    gemini = GeminiService()
+    
+    try:
+        # 初始化Gemini服务连接
+        await gemini.setup_connection()
+        
+        while True:
+            try:
+                # 接收音频数据
+                data = await websocket.receive_json()
+                if not data or 'audio_data' not in data:
+                    continue
+                    
+                audio_data = data['audio_data']
+                
+                # 处理音频数据
+                await gemini.process_audio_chunk(audio_data)
+                
+                # 接收并转发Gemini的响应
+                async for response in gemini.receive_responses():
+                    response_data = {}
+                    if response.text:
+                        response_data['text'] = response.text
+                    if response.audio:
+                        response_data['audio'] = base64.b64encode(response.audio).decode()
+                    
+                    if response_data:
+                        await websocket.send_json(response_data)
+                    
+            except json.JSONDecodeError:
+                logger.error("无效的JSON数据")
+                continue
+                
+    except WebSocketDisconnect:
+        logger.info("WebSocket连接断开")
+        await gemini.close()
+    except Exception as e:
+        logger.error(f"WebSocket处理错误: {str(e)}")
+        await gemini.close()
+        raise
 
 # 启动事件
 @app.on_event("startup")

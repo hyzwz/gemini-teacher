@@ -1,91 +1,117 @@
-import google.generativeai as genai
-from typing import List, Tuple
-import random
-from datetime import datetime, timedelta
+import os
+import json
 import asyncio
-from dataclasses import dataclass
+import base64
 import logging
+import pyaudio
+from dataclasses import dataclass
+from typing import Optional, AsyncGenerator
+import websockets
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 音频配置
+CHUNK_SIZE = 2048
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+SEND_SAMPLE_RATE = 16000
+RECEIVE_SAMPLE_RATE = 24000
+
 @dataclass
-class ApiKeyStatus:
-    key: str
-    requests: List[datetime]
-    is_active: bool = True
-    max_requests_per_minute: int = 60
+class GeminiResponse:
+    text: Optional[str] = None
+    audio: Optional[bytes] = None
 
 class GeminiService:
-    def __init__(self, api_keys: List[str]):
-        self.key_pool = [ApiKeyStatus(key=key, requests=[]) for key in api_keys]
-        logger.info(f"初始化GeminiService，API密钥数量: {len(api_keys)}")
-        
-    async def get_available_key(self) -> Tuple[str, ApiKeyStatus]:
-        current_time = datetime.now()
-        minute_ago = current_time - timedelta(minutes=1)
-        
-        # 随机打乱密钥顺序，实现负载均衡
-        available_keys = []
-        
-        for key_status in self.key_pool:
-            # 清理旧的请求记录
-            key_status.requests = [req_time for req_time in key_status.requests 
-                                 if req_time > minute_ago]
+    def __init__(self):
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY not found in environment variables")
             
-            # 检查是否可用
-            if (key_status.is_active and 
-                len(key_status.requests) < key_status.max_requests_per_minute):
-                available_keys.append(key_status)
+        self.host = 'generativelanguage.googleapis.com'
+        self.model = "gemini-2.0-flash-exp"
+        self.ws_uri = f"wss://{self.host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
+        self.ws = None
+        self.audio_queue = asyncio.Queue()
+        self.response_queue = asyncio.Queue()
+        self.is_speaking = False
         
-        logger.info(f"可用API密钥数量: {len(available_keys)}")
+    async def setup_connection(self):
+        """初始化WebSocket连接"""
+        headers = {"Content-Type": "application/json"}
+        self.ws = await websockets.connect(self.ws_uri, additional_headers=headers)
+        setup_msg = {"setup": {"model": f"models/{self.model}"}}
+        await self.ws.send(json.dumps(setup_msg))
+        await self.ws.recv()
         
-        if not available_keys:
-            logger.warning("没有可用的API密钥，等待1秒后重试")
-            # 如果没有可用的密钥，等待一段时间后重试
-            await asyncio.sleep(1)
-            return await self.get_available_key()
-        
-        # 随机选择一个可用的密钥
-        selected_key = random.choice(available_keys)
-        selected_key.requests.append(current_time)
-        logger.info(f"选择API密钥: {selected_key.key[-8:]}, 当前请求数: {len(selected_key.requests)}")
-        return selected_key.key, selected_key
-
-    async def process_with_gemini(self, text: str) -> Tuple[str, str]:
-        try:
-            logger.info(f"处理文本: {text[:100]}...")
-            api_key, key_status = await self.get_available_key()
-            genai.configure(api_key=api_key)
-            
-            # 调用Gemini API
-            model = genai.GenerativeModel('gemini-pro')
-            logger.info("开始调用Gemini API...")
-            
+    async def process_audio_chunk(self, chunk: str):
+        """处理单个音频块"""
+        if self.ws and not self.is_speaking:
             try:
-                # 使用同步方法，但在事件循环中运行
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: model.generate_content(text)
-                )
+                # 将base64字符串转换为字节
+                binary_data = base64.b64decode(chunk)
                 
-                if not response.text:
-                    raise Exception("API返回空响应")
-                    
-                logger.info(f"API调用成功，响应长度: {len(response.text)}")
-                return response.text, api_key
-                
-            except Exception as api_error:
-                logger.error(f"API调用失败: {str(api_error)}")
-                # 如果是API限制相关的错误，标记该密钥为不可用
-                if "quota" in str(api_error).lower() or "rate" in str(api_error).lower():
-                    key_status.is_active = False
-                    logger.warning(f"API密钥已被标记为不可用: {api_key[-8:]}")
+                msg = {
+                    "realtime_input": {
+                        "media_chunks": [
+                            {
+                                "data": base64.b64encode(binary_data).decode(),
+                                "mime_type": "audio/pcm"
+                            }
+                        ]
+                    }
+                }
+                await self.ws.send(json.dumps(msg))
+            except Exception as e:
+                logger.error(f"处理音频数据时出错: {str(e)}")
                 raise
             
+    async def receive_responses(self) -> AsyncGenerator[GeminiResponse, None]:
+        """接收并处理响应"""
+        accumulated_audio = b""
+        try:
+            async for msg in self.ws:
+                response = json.loads(msg)
+                
+                if "serverContent" in response:
+                    self.is_speaking = True
+                    try:
+                        # 获取文本响应
+                        if "text" in response["serverContent"]:
+                            text = response["serverContent"]["text"]
+                            yield GeminiResponse(text=text)
+                            
+                        # 获取音频响应
+                        if "modelTurn" in response["serverContent"]:
+                            audio_data = response["serverContent"]["modelTurn"]["parts"][0]["inlineData"]["data"]
+                            audio_chunk = base64.b64decode(audio_data)
+                            accumulated_audio += audio_chunk
+                            
+                            if len(accumulated_audio) >= CHUNK_SIZE:
+                                yield GeminiResponse(audio=accumulated_audio)
+                                accumulated_audio = b""
+                                
+                    except KeyError as e:
+                        logger.error(f"解析响应时出错: {str(e)}")
+                        continue
+                        
+                    # 如果响应完成
+                    if response["serverContent"].get("turnComplete"):
+                        if accumulated_audio:  # 发送剩余的音频数据
+                            yield GeminiResponse(audio=accumulated_audio)
+                        self.is_speaking = False
+                        break
+                        
         except Exception as e:
-            error_msg = f"Gemini服务错误: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            logger.error(f"接收响应时出错: {str(e)}")
+            raise
+
+    async def close(self):
+        """关闭连接"""
+        if self.ws:
+            await self.ws.close()
