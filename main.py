@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from typing import List
 from pydantic import BaseModel
 import time
+from sqlalchemy import select
 
 from database import get_db, init_db
 from models import User, UserLog
@@ -253,6 +254,19 @@ async def websocket_endpoint(
             
             print(f"token验证成功，用户名: {username}")
             
+            # 获取用户ID
+            user = await db.execute(
+                select(User).where(User.username == username)
+            )
+            user = user.scalar_one_or_none()
+            if not user:
+                print(f"找不到用户: {username}")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+                
+            user_id = user.id
+            print(f"获取到用户ID: {user_id}")
+            
             # 连接到manager
             await manager.connect(websocket, client_id)
             print(f"WebSocket连接已添加到manager: {client_id}")
@@ -260,7 +274,7 @@ async def websocket_endpoint(
             try:
                 async for message in websocket.iter_text():
                     print(f"收到消息: {message[:100]}...")
-                    await manager.process_message(message, client_id, username, db)
+                    await manager.process_message(message, client_id, user_id, db)
             except Exception as e:
                 print(f"处理消息时出错: {e}")
                 raise
