@@ -64,7 +64,13 @@ class GeminiService:
             logger.info("开始调用Gemini API...")
             
             try:
-                response = await model.generate_content_async(text)
+                # 使用同步方法，但在事件循环中运行
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: model.generate_content(text)
+                )
+                
                 if not response.text:
                     raise Exception("API返回空响应")
                     

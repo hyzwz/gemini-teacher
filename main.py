@@ -183,10 +183,16 @@ class ConnectionManager:
     async def process_message(self, message: str, client_id: str, user_id: int, db: AsyncSession):
         start_time = time.time()
         try:
+            print(f"开始处理消息: client_id={client_id}, user_id={user_id}")
+            print(f"消息内容: {message[:100]}...")
+            
             response, api_key = await self.gemini_service.process_with_gemini(message)
+            print(f"Gemini API响应: {response[:100]}...")
             
             # 记录用户操作日志
             processing_time = int((time.time() - start_time) * 1000)  # 转换为毫秒
+            print(f"处理时间: {processing_time}ms")
+            
             log = UserLog(
                 user_id=user_id,
                 action="speech_input",
@@ -197,12 +203,18 @@ class ConnectionManager:
             )
             db.add(log)
             await db.commit()
+            print("用户操作日志已记录")
             
             if client_id in self.active_connections:
+                print(f"发送响应到客户端: {client_id}")
                 await self.active_connections[client_id].send_text(response)
+                print("响应已发送")
+            else:
+                print(f"客户端已断开连接: {client_id}")
         
         except Exception as e:
             error_message = f"Error processing message: {str(e)}"
+            print(f"处理消息时出错: {error_message}")
             if client_id in self.active_connections:
                 await self.active_connections[client_id].send_text(error_message)
 
@@ -272,11 +284,33 @@ async def websocket_endpoint(
             print(f"WebSocket连接已添加到manager: {client_id}")
             
             try:
-                async for message in websocket.iter_text():
-                    print(f"收到消息: {message[:100]}...")
-                    await manager.process_message(message, client_id, user_id, db)
-            except Exception as e:
-                print(f"处理消息时出错: {e}")
+                while True:
+                    try:
+                        message = await websocket.receive_text()
+                        print(f"收到消息: {message[:100]}...")
+                        
+                        try:
+                            await manager.process_message(message, client_id, user_id, db)
+                        except Exception as process_error:
+                            print(f"处理消息时出错: {str(process_error)}")
+                            error_message = f"处理消息时出错: {str(process_error)}"
+                            await websocket.send_text(error_message)
+                            
+                    except WebSocketDisconnect:
+                        print(f"WebSocket断开连接: {client_id}")
+                        manager.disconnect(client_id)
+                        break
+                        
+                    except Exception as receive_error:
+                        print(f"接收消息时出错: {str(receive_error)}")
+                        if not isinstance(receive_error, WebSocketDisconnect):
+                            try:
+                                await websocket.send_text(f"接收消息时出错: {str(receive_error)}")
+                            except:
+                                pass
+                
+            except Exception as ws_error:
+                print(f"WebSocket处理循环出错: {str(ws_error)}")
                 raise
                 
         except JWTError as e:
