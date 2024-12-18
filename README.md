@@ -1,29 +1,39 @@
-# Gemini 英语口语助手
+# Gemini 英语学习助手
 
-这是一个基于 Google Gemini AI 的英语口语练习助手，它能实时识别你的英语发音，提供即时反馈和纠正建议。
+这是一个基于 Google Gemini AI 的多用户英语学习系统，支持实时语音识别和AI辅导。
 
 Make by [Box](https://x.com/boxmrchen)
 
 ## 功能特点
 
+- 👥 多用户系统
+- 🔐 JWT身份验证
 - 🎤 实时语音识别
-- 🤖 AI 驱动的发音评估
-- 📝 语法纠正
-- 🔄 情景对话练习
-- 🎯 针对性发音指导
-- 💡 智能场景切换
+- 🤖 AI 驱动的语言学习
+- 📝 语法纠正和建议
+- 🔄 实时对话练习
+- 🎯 个性化学习指导
+- 💡 WebSocket实时通信
 
 ## 系统要求
 
-- Python 3.11+ (必须)
+- Python 3.11+
+- 现代浏览器（支持WebSocket）
 - 麦克风设备
 - 网络连接
 
 ## 前置依赖
 
-需要一个 Gemini的API Key，这个API Key每天免费四百万次，足够使用了。
+1. Gemini API Key
+   - 访问 [Google AI Studio](https://aistudio.google.com/app/apikey) 生成API Key
+   - 每天免费提供400万次调用配额
 
-到这个页面 [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) 生成即可。
+2. 环境配置
+   - 创建 `.env` 文件，添加以下配置：
+   ```
+   GEMINI_API_KEYS=["your-api-key-1", "your-api-key-2"]
+   SECRET_KEY=your-jwt-secret-key
+   ```
 
 ## 安装
 
@@ -33,7 +43,7 @@ git clone https://github.com/nishuzumi/gemini-teacher.git
 cd gemini-teacher
 ```
 
-2. 创建并激活虚拟环境（推荐）：
+2. 创建并激活虚拟环境：
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Unix/macOS
@@ -41,47 +51,48 @@ source .venv/bin/activate  # Unix/macOS
 .venv\Scripts\activate  # Windows
 ```
 
-3. 安装依赖：
-
-在安装 Python 依赖前，请先安装以下系统依赖：
-
+3. 安装系统依赖：
 - Windows: 无需额外安装
 - macOS: `brew install portaudio`
 - Ubuntu/Debian: `sudo apt-get install portaudio19-dev python3-pyaudio`
 
+4. 安装Python依赖：
 ```bash
 pip install -r requirements.txt
 ```
 
 ## 使用方法
 
-1. 运行程序：
-
-先设定Key
+1. 启动后端服务：
 ```bash
-// Linux or Macos
-export GOOGLE_API_KEY=[your-api-key]
-// Windows
-
-// Windows - CMD
-set GOOGLE_API_KEY=[your-api-key]
-// Windows - Powershell
-$env:GOOGLE_API_KEY="[your-api-key]"
-```
-然后执行
-```bash
-python starter.py
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8081
 ```
 
-2. 按照提示说出英语句子
-3. 等待 AI 助手的反馈
-4. 根据反馈改进发音
+2. 访问前端页面：
+- 使用浏览器打开 `http://127.0.0.1:8081`
+- 注册/登录账号
+- 开始英语学习对话
+
+## 系统架构
+
+- 前端：HTML + JavaScript
+  - 实时语音识别
+  - WebSocket通信
+  - JWT认证
+
+- 后端：FastAPI + SQLite
+  - RESTful API
+  - WebSocket服务
+  - 用户认证
+  - Gemini AI集成
 
 ## 交互说明
 
-- 🎤 : 正在录音
-- ♻️ : 正在处理
-- 🤖 : AI 反馈
+- 🟢 已连接：WebSocket连接正常
+- 🔴 未连接：WebSocket连接断开
+- 🎤 录音中：正在采集语音
+- ⏳ 处理中：AI正在分析
+- 💬 反馈：显示AI反馈
 
 ## 许可证
 
@@ -90,3 +101,12 @@ MIT
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+## 更新日志
+
+### 2024-12-18
+- 添加多用户支持
+- 实现JWT身份验证
+- 添加WebSocket实时通信
+- 优化前端界面
+- 改进错误处理
