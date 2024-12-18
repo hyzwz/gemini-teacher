@@ -3,10 +3,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.websockets import WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
-import jwt
-from jose import JWTError
+from jose import jwt, JWTError
 import json
 import os
 from dotenv import load_dotenv
@@ -36,10 +36,14 @@ app = FastAPI()
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:5500",  # Live Server 地址
+        "http://localhost:5500",   # 备用地址
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -126,10 +130,10 @@ class ConnectionManager:
         self.gemini_service = GeminiService(api_keys)
     
     async def connect(self, websocket: WebSocket, client_id: str):
-        await websocket.accept()
+        # 不需要再次accept，因为在endpoint中已经accept过了
         self.active_connections[client_id] = websocket
-    
-    async def disconnect(self, client_id: str):
+
+    def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
     
@@ -165,39 +169,72 @@ manager = ConnectionManager()
 async def websocket_endpoint(
     websocket: WebSocket,
     client_id: str,
-    token: str = None,
     db: AsyncSession = Depends(get_db)
 ):
-    if not token:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-        
+    print(f"收到WebSocket连接请求: client_id={client_id}")
     try:
-        # 验证token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if not username:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-            
-        # 获取用户信息
-        user = await get_user(db, username)
-        if not user:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-            
-        await manager.connect(websocket, client_id)
+        # 先接受连接
+        await websocket.accept()
+        print("WebSocket连接已接受")
+        
+        # 获取token
+        token = None
         try:
-            while True:
-                data = await websocket.receive_text()
-                await manager.process_message(data, client_id, user.id, db)
+            # 从查询参数中获取token
+            token = websocket.query_params.get('token')
+            print(f"从查询参数获取到token: {token[:20]}...")
+            if not token:
+                # 从headers中获取token
+                auth_header = websocket.headers.get('authorization')
+                if auth_header and auth_header.startswith('Bearer '):
+                    token = auth_header.split(' ')[1]
+                    print("从header获取到token")
         except Exception as e:
-            print(f"WebSocket error: {str(e)}")
-        finally:
-            await manager.disconnect(client_id)
-    except JWTError:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+            print(f"获取token时出错: {e}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        if not token:
+            print("未提供token")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        try:
+            # 验证token
+            print("开始验证token...")
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+            if not username:
+                print("token中没有用户名")
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            
+            print(f"token验证成功，用户名: {username}")
+            
+            # 连接到manager
+            await manager.connect(websocket, client_id)
+            print(f"WebSocket连接已添加到manager: {client_id}")
+            
+            try:
+                async for message in websocket.iter_text():
+                    print(f"收到消息: {message[:100]}...")
+                    await manager.process_message(message, client_id, username, db)
+            except Exception as e:
+                print(f"处理消息时出错: {e}")
+                raise
+                
+        except JWTError as e:
+            print(f"token验证失败: {e}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+            
+    except WebSocketDisconnect:
+        print(f"WebSocket断开连接: {client_id}")
+        manager.disconnect(client_id)
+    except Exception as e:
+        print(f"WebSocket处理发生错误: {e}")
+        if client_id in manager.active_connections:
+            manager.disconnect(client_id)
 
 # 启动事件
 @app.on_event("startup")

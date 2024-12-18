@@ -66,14 +66,19 @@ class AudioRecorder {
 class WebSocketClient {
     constructor() {
         this.ws = null;
-        this.token = '';
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
     }
 
     connect() {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            console.error('No token available');
+            return;
+        }
+
         const clientId = 'user_' + Math.random().toString(36).substr(2, 9);
-        this.ws = new WebSocket(`ws://${window.location.host}/ws/${clientId}`);
+        this.ws = new WebSocket(`ws://127.0.0.1:8081/ws/${clientId}?token=${token}`);
         
         this.ws.onopen = () => {
             console.log('WebSocket连接成功');
@@ -92,7 +97,9 @@ class WebSocketClient {
         this.ws.onclose = () => {
             document.getElementById('connectionStatus').textContent = '未连接';
             document.getElementById('connectionStatus').style.color = 'red';
-            this.reconnect();
+            if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                setTimeout(() => this.reconnect(), 3000);
+            }
         };
 
         this.ws.onerror = (error) => {
@@ -101,13 +108,9 @@ class WebSocketClient {
     }
 
     reconnect() {
-        if (this.reconnectAttempts < this.maxReconnectAttempts) {
-            this.reconnectAttempts++;
-            console.log(`尝试重连... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-            setTimeout(() => this.connect(), 3000);
-        } else {
-            console.error('WebSocket重连失败，请刷新页面重试');
-        }
+        this.reconnectAttempts++;
+        console.log(`尝试重新连接... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        this.connect();
     }
 
     send(message) {
@@ -170,6 +173,7 @@ class App {
         const password = document.getElementById('password').value;
 
         try {
+            console.log('开始登录请求...');
             const formData = new URLSearchParams();
             formData.append('username', username);
             formData.append('password', password);
@@ -180,10 +184,21 @@ class App {
                 }
             });
 
-            localStorage.setItem('token', response.data.access_token);
-            this.showMainSection();
-            this.wsClient.connect();
+            console.log('登录响应:', response.data);
+            if (response.data.access_token) {
+                console.log('获取到token，正在存储...');
+                localStorage.setItem('token', response.data.access_token);
+                console.log('token已存储，准备显示主界面...');
+                this.showMainSection();
+                console.log('正在连接WebSocket...');
+                this.wsClient.connect();
+            } else {
+                console.error('登录响应中没有token');
+                alert('登录失败：服务器响应格式错误');
+            }
         } catch (error) {
+            console.error('登录错误:', error);
+            console.error('错误详情:', error.response?.data);
             alert('登录失败：' + (error.response?.data?.detail || error.message));
         }
     }
@@ -194,13 +209,14 @@ class App {
         const password = document.getElementById('regPassword').value;
 
         try {
-            const response = await axios.post('/register', {
-                username: username,
-                email: email,
-                password: password
-            }, {
+            const formData = new URLSearchParams();
+            formData.append('username', username);
+            formData.append('email', email);
+            formData.append('password', password);
+
+            const response = await axios.post('/register', formData, {
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/x-www-form-urlencoded'
                 }
             });
             alert('注册成功！请登录');
@@ -262,9 +278,49 @@ class App {
     }
 }
 
+// 添加axios请求拦截器
+axios.interceptors.request.use(function (config) {
+    const token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+}, function (error) {
+    return Promise.reject(error);
+});
+
+// 添加axios响应拦截器
+axios.interceptors.response.use(function (response) {
+    return response;
+}, function (error) {
+    if (error.response && error.response.status === 401) {
+        // token过期或无效，清除token并返回登录页面
+        localStorage.removeItem('token');
+        window.app.showLoginSection();
+    }
+    return Promise.reject(error);
+});
+
 // 初始化应用
 window.onload = () => {
+    // 设置 axios 默认配置
+    axios.defaults.baseURL = 'http://127.0.0.1:8081';  // 修改为实际使用的地址
+    axios.defaults.withCredentials = true;  // 允许跨域请求携带凭证
+    
     const app = new App();
+    window.app = app;  // 保存app实例到全局，方便拦截器使用
+
+    // 添加注册和登录切换的事件监听
+    document.getElementById('showRegister').addEventListener('click', (e) => {
+        e.preventDefault();
+        app.showRegisterSection();
+    });
+    
+    document.getElementById('showLogin').addEventListener('click', (e) => {
+        e.preventDefault();
+        app.showLoginSection();
+    });
+
     // 检查是否已登录
     const token = localStorage.getItem('token');
     if (token) {
