@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>英语学习助手</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div id="loginSection" class="section">
+            <h2>登录</h2>
+            <form id="loginForm">
+                <input type="text" id="username" placeholder="用户名" required>
+                <input type="password" id="password" placeholder="密码" required>
+                <button type="submit">登录</button>
+            </form>
+            <p>还没有账号？ <a href="#" onclick="showRegister()">注册</a></p>
+        </div>
+
+        <div id="registerSection" class="section" style="display: none;">
+            <h2>注册</h2>
+            <form id="registerForm">
+                <input type="text" id="regUsername" placeholder="用户名" required>
+                <input type="email" id="regEmail" placeholder="邮箱" required>
+                <input type="password" id="regPassword" placeholder="密码" required>
+                <button type="submit">注册</button>
+            </form>
+            <p>已有账号？ <a href="#" onclick="showLogin()">登录</a></p>
+        </div>
+
+        <div id="mainSection" class="section" style="display: none;">
+            <h1>英语学习助手</h1>
+            <div class="controls">
+                <button id="startRecord" class="primary-button">开始录音</button>
+                <button id="stopRecord" class="primary-button" disabled>停止录音</button>
+            </div>
+            <div class="display">
+                <div id="userInput" class="message-box">您说：</div>
+                <div id="feedback" class="message-box">Gemini反馈：</div>
+            </div>
+            <button id="logout" class="secondary-button">登出</button>
+        </div>
+    </div>
+
+    <script>
+        let token = '';
+        let ws = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        
+        // 显示登录/注册部分
+        function showLogin() {
+            document.getElementById('loginSection').style.display = 'block';
+            document.getElementById('registerSection').style.display = 'none';
+        }
+
+        function showRegister() {
+            document.getElementById('loginSection').style.display = 'none';
+            document.getElementById('registerSection').style.display = 'block';
+        }
+
+        // 登录表单处理
+        document.getElementById('loginForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const response = await axios.post('/token', {
+                    username: username,
+                    password: password
+                }, {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                });
+
+                token = response.data.access_token;
+                showMainSection();
+                initializeWebSocket();
+            } catch (error) {
+                alert('登录失败：' + error.response.data.detail);
+            }
+        };
+
+        // 注册表单处理
+        document.getElementById('registerForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('regUsername').value;
+            const email = document.getElementById('regEmail').value;
+            const password = document.getElementById('regPassword').value;
+
+            try {
+                await axios.post('/register', {
+                    username: username,
+                    email: email,
+                    password: password
+                });
+                alert('注册成功！请登录');
+                showLogin();
+            } catch (error) {
+                alert('注册失败：' + error.response.data.detail);
+            }
+        };
+
+        // 显示主界面
+        function showMainSection() {
+            document.getElementById('loginSection').style.display = 'none';
+            document.getElementById('registerSection').style.display = 'none';
+            document.getElementById('mainSection').style.display = 'block';
+        }
+
+        // WebSocket初始化
+        function initializeWebSocket() {
+            const clientId = 'user_' + Math.random().toString(36).substr(2, 9);
+            ws = new WebSocket(`ws://${window.location.host}/ws/${clientId}`);
+            
+            ws.onmessage = (event) => {
+                document.getElementById('feedback').innerText = 'Gemini反馈：' + event.data;
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket连接断开，尝试重连...');
+                setTimeout(initializeWebSocket, 3000);
+            };
+        }
+
+        // 录音控制
+        document.getElementById('startRecord').onclick = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.start();
+                document.getElementById('startRecord').disabled = true;
+                document.getElementById('stopRecord').disabled = false;
+            } catch (error) {
+                alert('无法访问麦克风：' + error);
+            }
+        };
+
+        document.getElementById('stopRecord').onclick = () => {
+            mediaRecorder.stop();
+            document.getElementById('startRecord').disabled = false;
+            document.getElementById('stopRecord').disabled = true;
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks);
+                // 这里需要添加语音转文本的处理
+                // 临时使用文本示例
+                const text = "This is a test message";
+                document.getElementById('userInput').innerText = '您说：' + text;
+                ws.send(text);
+            };
+        };
+
+        // 登出处理
+        document.getElementById('logout').onclick = () => {
+            token = '';
+            if (ws) {
+                ws.close();
+            }
+            document.getElementById('loginSection').style.display = 'block';
+            document.getElementById('mainSection').style.display = 'none';
+        };
+    </script>
+</body>
+</html>
