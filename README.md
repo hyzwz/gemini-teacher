@@ -2,7 +2,6 @@
 
 这是一个基于 Google Gemini AI 的多用户英语学习系统，支持实时语音识别和AI辅导。
 
-Make by [Box](https://x.com/boxmrchen)
 
 ## 功能特点
 

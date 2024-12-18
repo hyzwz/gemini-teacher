@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, Depends, HTTPException, status, Request, Form
+from fastapi import FastAPI, WebSocket, Depends, HTTPException, status, Request, Form, File, UploadFile
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -9,9 +9,12 @@ from datetime import timedelta
 from jose import jwt, JWTError
 import json
 import os
+import uuid
+import logging
 from dotenv import load_dotenv
 from typing import List
 from pydantic import BaseModel
+import time
 
 from database import get_db, init_db
 from models import User, UserLog
@@ -26,6 +29,7 @@ from auth import (
     ALGORITHM
 )
 from gemini_service import GeminiService
+import speech_recognition as sr
 
 # 加载环境变量
 load_dotenv()
@@ -122,6 +126,44 @@ async def register(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+@app.post("/speech-to-text")
+async def speech_to_text(audio: UploadFile = File(...)):
+    try:
+        print("开始处理语音文件...")
+        # 保存上传的音频文件
+        audio_path = f"temp_{uuid.uuid4()}.wav"
+        with open(audio_path, "wb") as buffer:
+            content = await audio.read()
+            buffer.write(content)
+            
+        print(f"音频文件已保存到: {audio_path}")
+
+        try:
+            # 使用Google Speech Recognition进行语音识别
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(audio_path) as source:
+                print("正在读取音频文件...")
+                audio_data = recognizer.record(source)
+                print("正在进行语音识别...")
+                text = recognizer.recognize_google(audio_data, language="zh-CN")
+                print(f"语音识别结果: {text}")
+                return {"text": text}
+        except sr.UnknownValueError:
+            print("Google Speech Recognition无法理解音频")
+            raise HTTPException(status_code=400, detail="无法识别语音内容")
+        except sr.RequestError as e:
+            print(f"无法从Google Speech Recognition服务获取结果; {e}")
+            raise HTTPException(status_code=500, detail="语音识别服务暂时不可用")
+        finally:
+            # 清理临时文件
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                print("临时音频文件已删除")
+
+    except Exception as e:
+        print(f"语音识别错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # WebSocket连接管理
 class ConnectionManager:

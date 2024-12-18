@@ -7,8 +7,15 @@ class AudioRecorder {
 
     async start() {
         try {
-            this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            this.mediaRecorder = new MediaRecorder(this.stream);
+            this.stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    channelCount: 1,
+                    sampleRate: 16000
+                }
+            });
+            this.mediaRecorder = new MediaRecorder(this.stream, {
+                mimeType: 'audio/webm'
+            });
             this.audioChunks = [];
 
             this.mediaRecorder.ondataavailable = (event) => {
@@ -26,39 +33,102 @@ class AudioRecorder {
     stop() {
         return new Promise((resolve) => {
             this.mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(this.audioChunks, { type: 'audio/wav' });
-                // 将音频转换为文本
-                const text = await this.convertSpeechToText(audioBlob);
-                resolve(text);
+                const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                console.log('录音结束，开始转换为文本...');
+                
+                // 转换为WAV格式
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const fileReader = new FileReader();
+                
+                fileReader.onload = async () => {
+                    const arrayBuffer = fileReader.result;
+                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    
+                    // 创建WAV文件
+                    const wavBlob = this.audioBufferToWav(audioBuffer);
+                    const text = await this.convertSpeechToText(wavBlob);
+                    resolve(text);
+                };
+                
+                fileReader.readAsArrayBuffer(audioBlob);
             };
+            
             this.mediaRecorder.stop();
             this.stream.getTracks().forEach(track => track.stop());
         });
     }
 
+    // 将AudioBuffer转换为WAV格式
+    audioBufferToWav(audioBuffer) {
+        const numOfChan = audioBuffer.numberOfChannels;
+        const length = audioBuffer.length * numOfChan * 2;
+        const buffer = new ArrayBuffer(44 + length);
+        const view = new DataView(buffer);
+        const channels = [];
+        let offset = 0;
+        let pos = 0;
+
+        // 写入WAV头
+        const writeString = (view, offset, string) => {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        };
+
+        // RIFF chunk descriptor
+        writeString(view, pos, 'RIFF'); pos += 4;
+        view.setUint32(pos, 36 + length, true); pos += 4;
+        writeString(view, pos, 'WAVE'); pos += 4;
+
+        // fmt sub-chunk
+        writeString(view, pos, 'fmt '); pos += 4;
+        view.setUint32(pos, 16, true); pos += 4;
+        view.setUint16(pos, 1, true); pos += 2;
+        view.setUint16(pos, numOfChan, true); pos += 2;
+        view.setUint32(pos, audioBuffer.sampleRate, true); pos += 4;
+        view.setUint32(pos, audioBuffer.sampleRate * 2 * numOfChan, true); pos += 4;
+        view.setUint16(pos, numOfChan * 2, true); pos += 2;
+        view.setUint16(pos, 16, true); pos += 2;
+
+        // data sub-chunk
+        writeString(view, pos, 'data'); pos += 4;
+        view.setUint32(pos, length, true); pos += 4;
+
+        // 写入PCM数据
+        for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
+            channels.push(audioBuffer.getChannelData(i));
+        }
+
+        while (pos < view.byteLength) {
+            for (let i = 0; i < numOfChan; i++) {
+                const sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                view.setInt16(pos, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                pos += 2;
+            }
+            offset++;
+        }
+
+        return new Blob([buffer], { type: 'audio/wav' });
+    }
+
     async convertSpeechToText(audioBlob) {
         try {
-            const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-            recognition.lang = 'en-US'; // 设置为英语
-            recognition.continuous = false;
-            recognition.interimResults = false;
+            console.log('开始语音识别...');
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'recording.wav');
 
-            return new Promise((resolve, reject) => {
-                recognition.onresult = (event) => {
-                    const text = event.results[0][0].transcript;
-                    resolve(text);
-                };
-
-                recognition.onerror = (error) => {
-                    reject(error);
-                };
-
-                recognition.start();
+            // 发送到后端进行语音识别
+            const response = await axios.post('/speech-to-text', formData, {
+                headers: {
+                    'Content-Type': 'multipart/form-data'
+                }
             });
+
+            console.log('语音识别结果:', response.data);
+            return response.data.text;
         } catch (error) {
             console.error('语音识别错误:', error);
-            // 如果语音识别失败，返回一个测试文本
-            return "This is a test message. Speech recognition failed.";
+            return "Speech recognition failed. Please try again.";
         }
     }
 }
